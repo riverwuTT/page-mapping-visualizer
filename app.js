@@ -9,16 +9,15 @@
     "use strict";
     const PM = window.PageMapping;
 
-    // Named tt-metal layouts are just settings of the two compartments.
+    // Each preset selects a sharding model and its inputs.
     const PRESETS = [
-        ["Interleaved", { pageGrid: "20", shardShape: "1", bankX: 6, bankY: 1, distribution: "interleaved", orientation: "row_major" }],
-        ["Height", { pageGrid: "8,2", shardShape: "2,2", bankX: 1, bankY: 4, distribution: "round_robin", orientation: "row_major" }],
-        ["Block / grid", { pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2, distribution: "grid_2d", orientation: "row_major" }],
-        ["Block (partial)", { pageGrid: "5,5", shardShape: "2,2", bankX: 3, bankY: 3, distribution: "grid_2d", orientation: "row_major" }],
-        ["ND stacked", { pageGrid: "4,4", shardShape: "2,2", bankX: 1, bankY: 2, distribution: "round_robin", orientation: "row_major" }],
-        ["ND rank-3", { pageGrid: "2,4,4", shardShape: "1,2,2", bankX: 2, bankY: 2, distribution: "round_robin", orientation: "row_major" }],
-        ["Legacy height", { pageGrid: "4,4", shardShape: "2,2", bankX: 4, bankY: 1, distribution: "legacy", legacyLayout: "height", orientation: "row_major" }],
-        ["Legacy block", { pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2, distribution: "legacy", legacyLayout: "block", orientation: "row_major" }],
+        ["Interleave", { model: "interleave", pageGrid: "20", bankX: 6, bankY: 1 }],
+        ["Continuous fill", { model: "continuous", pageGrid: "8,2", shardShape: "2,2", bankX: 4, bankY: 1 }],
+        ["Grid sharding", { model: "grid", pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2 }],
+        ["Grid (partial)", { model: "grid", pageGrid: "5,5", shardShape: "2,2", bankX: 3, bankY: 3 }],
+        ["ND round-robin", { model: "nd", pageGrid: "4,4", shardShape: "2,2", bankX: 1, bankY: 2, distribution: "round_robin" }],
+        ["ND grid", { model: "nd", pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2, distribution: "grid_2d" }],
+        ["ND rank-3", { model: "nd", pageGrid: "2,4,4", shardShape: "1,2,2", bankX: 2, bankY: 2, distribution: "round_robin" }],
     ];
 
     const el = (id) => document.getElementById(id);
@@ -29,11 +28,9 @@
         shardShapeField: el("shardShapeField"),
         bankX: el("bankX"),
         bankY: el("bankY"),
-        shardingFamily: el("shardingFamily"),
+        shardingModel: el("shardingModel"),
         distribution: el("distribution"),
         ndDistField: el("ndDistField"),
-        legacyLayout: el("legacyLayout"),
-        legacyLayoutField: el("legacyLayoutField"),
         orientation: el("orientation"),
         presets: el("presets"),
         error: el("error"),
@@ -223,16 +220,13 @@
             const b = document.createElement("button");
             b.textContent = name;
             b.onclick = () => {
+                dom.shardingModel.value = vals.model;
                 dom.pageGrid.value = vals.pageGrid;
-                dom.shardShape.value = vals.shardShape;
+                if (vals.shardShape) dom.shardShape.value = vals.shardShape;
                 dom.bankX.value = vals.bankX;
                 dom.bankY.value = vals.bankY;
-                const fam =
-                    vals.distribution === "legacy" ? "legacy" : vals.distribution === "interleaved" ? "interleaved" : "nd";
-                dom.shardingFamily.value = fam;
-                dom.distribution.value = fam === "nd" ? vals.distribution : "round_robin";
-                dom.legacyLayout.value = vals.legacyLayout || "block";
-                dom.orientation.value = vals.orientation;
+                if (vals.model === "nd") dom.distribution.value = vals.distribution || "round_robin";
+                dom.orientation.value = vals.orientation || "row_major";
                 render();
             };
             dom.presets.appendChild(b);
@@ -246,20 +240,28 @@
         cubeScenes.length = 0;
         selection.clear();
         selectedCells = [];
-        const family = dom.shardingFamily.value; // nd | legacy | interleaved
-        const isLegacy = family === "legacy";
-        const isInterleaved = family === "interleaved";
-        dom.legacyLayoutField.style.display = isLegacy ? "" : "none";
-        dom.ndDistField.style.display = family === "nd" ? "" : "none";
-        dom.shardShapeField.style.display = isInterleaved ? "none" : "";
+        // Map the four sharding models onto the model API:
+        //   interleave -> interleaved | continuous -> legacy height
+        //   grid -> legacy block      | nd -> ND (round-robin / grid_2d sub-option)
+        const model = dom.shardingModel.value;
+        const isInterleave = model === "interleave";
+        const isND = model === "nd";
+        dom.shardShapeField.style.display = isInterleave ? "none" : "";
+        dom.ndDistField.style.display = isND ? "" : "none";
+        let distribution = "round_robin";
+        let legacyLayout = "block";
+        if (model === "interleave") distribution = "interleaved";
+        else if (model === "continuous") (distribution = "legacy"), (legacyLayout = "height");
+        else if (model === "grid") (distribution = "legacy"), (legacyLayout = "block");
+        else distribution = dom.distribution.value; // nd
         let res;
         try {
             const cfg = {
                 pageGrid: parseShape(dom.pageGrid.value),
-                shardShape: isInterleaved ? [1] : parseShape(dom.shardShape.value),
+                shardShape: isInterleave ? [1] : parseShape(dom.shardShape.value),
                 bankGrid: { x: intOf(dom.bankX), y: intOf(dom.bankY) },
-                distribution: isInterleaved ? "interleaved" : isLegacy ? "legacy" : dom.distribution.value,
-                legacyLayout: dom.legacyLayout.value,
+                distribution,
+                legacyLayout,
                 orientation: dom.orientation.value,
             };
             dom.pageCount.textContent = `= ${PM.volume(cfg.pageGrid)} pages`;
@@ -512,7 +514,7 @@
     [dom.pageGrid, dom.shardShape, dom.bankX, dom.bankY].forEach((i) =>
         i.addEventListener("input", render)
     );
-    [dom.shardingFamily, dom.distribution, dom.legacyLayout, dom.orientation, dom.cube3d].forEach((i) =>
+    [dom.shardingModel, dom.distribution, dom.orientation, dom.cube3d].forEach((i) =>
         i.addEventListener("change", render)
     );
     render();

@@ -37,18 +37,20 @@ ok(PM && typeof PM.computeMapping === "function", "PageMapping global exposed in
 ok(errText() === "", `default boot has no error (got "${errText()}")`);
 ok(shardCards() > 0 && bankCols() > 0, "default boot renders both compartments");
 
+// distribution/legacyLayout map onto the four sharding-model options
+function modelFor(distribution, legacyLayout) {
+    if (distribution === "interleaved") return "interleave";
+    if (distribution === "legacy") return legacyLayout === "height" ? "continuous" : "grid";
+    return "nd";
+}
 function drive({ pageGrid, shardShape, bankX, bankY, distribution, legacyLayout, orientation }) {
     set("pageGrid", pageGrid);
     set("shardShape", shardShape);
     set("bankX", bankX);
     set("bankY", bankY);
-    if (distribution === "legacy") {
-        set("shardingFamily", "legacy");
-        set("legacyLayout", legacyLayout || "block");
-    } else {
-        set("shardingFamily", "nd");
-        set("distribution", distribution);
-    }
+    const model = modelFor(distribution, legacyLayout);
+    set("shardingModel", model);
+    if (model === "nd") set("distribution", distribution);
     set("orientation", orientation);
 }
 
@@ -66,40 +68,46 @@ for (const [name, cfg, nShards, nPages, nBanks] of cases) {
     ok(bankCols() === nBanks, `${name}: ${nBanks} bank columns (got ${bankCols()})`);
 }
 
-// ---- legacy distribution + layout sub-selector -----------------------------
+// ---- continuous-fill (height) vs grid models -------------------------------
 {
-    const field = document.getElementById("legacyLayoutField");
     const ndField = document.getElementById("ndDistField");
-    // legacy layout hidden under ND; ND distribution hidden under legacy
-    set("shardingFamily", "nd");
-    ok(field.style.display === "none", "legacy layout field hidden for ND");
+    const bank0Pages = () =>
+        [...document.querySelectorAll("#banksView .bank")][0].querySelectorAll(".cell[data-page]");
+    const b0 = () => [...bank0Pages()].map((c) => +c.dataset.page);
+
+    // ND distribution sub-field only shows under the ND model
+    set("shardingModel", "nd");
     ok(ndField.style.display !== "none", "ND distribution field shown for ND");
+    set("shardingModel", "grid");
+    ok(ndField.style.display === "none", "ND distribution field hidden for grid");
+
     set("pageGrid", "4,4");
     set("shardShape", "2,2");
     set("bankX", 4);
     set("bankY", 1);
-    set("shardingFamily", "legacy");
-    ok(field.style.display !== "none", "legacy layout field shown for legacy");
-    ok(ndField.style.display === "none", "ND distribution field hidden for legacy");
 
-    set("legacyLayout", "height");
-    ok(errText() === "", `legacy height no error (got "${errText()}")`);
-    // contiguous chunking: bank 0 holds pages 0..3 in device order
-    const bank0 = [...document.querySelectorAll("#banksView .bank")][0];
-    const b0pages = [...bank0.querySelectorAll(".cell[data-page]")].map((c) => +c.dataset.page);
-    ok(JSON.stringify(b0pages) === JSON.stringify([0, 1, 2, 3]), `legacy height bank0 contiguous (got ${b0pages})`);
+    // continuous fill = legacy height = contiguous chunks
+    set("shardingModel", "continuous");
+    ok(errText() === "", `continuous no error (got "${errText()}")`);
+    ok(JSON.stringify(b0()) === JSON.stringify([0, 1, 2, 3]), `continuous bank0 contiguous (got ${b0()})`);
+
+    // grid sharding = 2D sub-blocks (bank 0 differs from continuous)
+    set("bankX", 2);
+    set("bankY", 2);
+    set("shardingModel", "grid");
+    ok(errText() === "", `grid no error (got "${errText()}")`);
+    ok(JSON.stringify(b0()) === JSON.stringify([0, 1, 4, 5]), `grid bank0 = 2D sub-block (got ${b0()})`);
 }
 
-// ---- interleaved is its own family ------------------------------------------
+// ---- interleave is its own model --------------------------------------------
 {
-    set("shardingFamily", "interleaved");
+    set("shardingModel", "interleave");
     set("pageGrid", "20");
     set("bankX", 6);
     set("bankY", 1);
-    ok(document.getElementById("shardShapeField").style.display === "none", "interleaved hides shard shape");
-    ok(document.getElementById("ndDistField").style.display === "none", "interleaved hides ND distribution");
-    ok(document.getElementById("legacyLayoutField").style.display === "none", "interleaved hides legacy layout");
-    ok(errText() === "", `interleaved no error (got "${errText()}")`);
+    ok(document.getElementById("shardShapeField").style.display === "none", "interleave hides shard shape");
+    ok(document.getElementById("ndDistField").style.display === "none", "interleave hides ND distribution");
+    ok(errText() === "", `interleave no error (got "${errText()}")`);
     // shards view is a note, not 20 cards
     ok(document.querySelectorAll("#shardsView .shard-card").length === 0, "interleaved: no shard cards");
     ok(document.querySelectorAll("#banksView .bank").length === 6, "interleaved: 6 bank columns");
@@ -110,20 +118,21 @@ for (const [name, cfg, nShards, nPages, nBanks] of cases) {
 
 // preset buttons exist and are wired
 ok(document.querySelectorAll("#presets button").length >= 5, "preset buttons rendered");
-document.querySelectorAll("#presets button")[0].click(); // Interleaved
+document.querySelectorAll("#presets button")[0].click(); // Interleave
 ok(errText() === "", "preset click has no error");
 
-// a legacy preset switches the sharding-model selector over to legacy
+// presets switch the sharding-model selector over
 {
     const btns = [...document.querySelectorAll("#presets button")];
-    const legacyBtn = btns.find((b) => /legacy/i.test(b.textContent));
-    ok(legacyBtn, "a legacy preset button exists");
-    legacyBtn.click();
-    ok(document.getElementById("shardingFamily").value === "legacy", "legacy preset switches family to legacy");
-    ok(document.getElementById("legacyLayoutField").style.display !== "none", "legacy preset reveals legacy layout");
-    // and an ND preset switches back
-    btns.find((b) => /block|grid/i.test(b.textContent)).click();
-    ok(document.getElementById("shardingFamily").value === "nd", "ND preset switches family back to nd");
+    const model = () => document.getElementById("shardingModel").value;
+    btns.find((b) => /interleave/i.test(b.textContent)).click();
+    ok(model() === "interleave", "Interleave preset selects interleave model");
+    btns.find((b) => /continuous/i.test(b.textContent)).click();
+    ok(model() === "continuous", "Continuous-fill preset selects continuous model");
+    btns.find((b) => /^grid sharding/i.test(b.textContent)).click();
+    ok(model() === "grid", "Grid preset selects grid model");
+    btns.find((b) => /^nd /i.test(b.textContent)).click();
+    ok(model() === "nd", "ND preset selects nd model");
 }
 
 // ---- click-to-toggle (linked selection) ------------------------------------

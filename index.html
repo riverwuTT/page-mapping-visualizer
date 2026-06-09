@@ -27,11 +27,12 @@
 
             <div class="grp">Sharding model</div>
             <div class="field">
-                <label>ND vs legacy</label>
-                <select id="shardingFamily">
-                    <option value="nd">ND (BufferDistributionSpec)</option>
-                    <option value="legacy">legacy (classic)</option>
-                    <option value="interleaved">interleaved (not sharded)</option>
+                <label>Model</label>
+                <select id="shardingModel">
+                    <option value="interleave">Interleave</option>
+                    <option value="continuous">Continuous fill (height)</option>
+                    <option value="grid" selected>Grid sharding (width / block)</option>
+                    <option value="nd">ND sharding</option>
                 </select>
             </div>
 
@@ -52,20 +53,12 @@
                 <div class="field"><label>Bank grid X</label><input type="number" min="1" step="1" id="bankX" value="2" /></div>
                 <div class="field"><label>Bank grid Y</label><input type="number" min="1" step="1" id="bankY" value="2" /></div>
             </div>
-            <div class="field" id="ndDistField">
+            <div class="field" id="ndDistField" style="display: none">
                 <label>ND distribution</label>
                 <select id="distribution">
                     <option value="round_robin">round-robin (1D, stacks)</option>
                     <option value="grid_2d">grid (2D, shard grid → bank grid)</option>
                 </select>
-            </div>
-            <div class="field" id="legacyLayoutField" style="display: none">
-                <label>Legacy layout</label>
-                <select id="legacyLayout">
-                    <option value="block">block (2D sub-blocks)</option>
-                    <option value="height">height (contiguous chunks)</option>
-                </select>
-                <div class="hint">classic core_to_host_pages; height chunks the flat page stream</div>
             </div>
             <div class="field">
                 <label>Orientation</label>

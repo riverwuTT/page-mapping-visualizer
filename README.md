@@ -2,7 +2,8 @@
 
 A JavaScript port of tt-metal's `buffer.hpp` allocation model, with a single-file
 HTML visualizer. Shows, for a list of pages: **which bank/core** it lands in and
-**what shard offset**, across interleaved, height / width / block, and ND sharding.
+**what shard offset**, across four sharding models: **interleave**, **continuous
+fill (height)**, **grid sharding (width / block)**, and **ND sharding**.
 
 All shapes are expressed **in pages** (the element-shape ÷ page-shape conversion
 that `convert_shape_to_pages` does in C++ is assumed already applied).
