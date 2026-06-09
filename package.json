@@ -1,16 +1,18 @@
 {
-  "name": "page_mapping_viz",
+  "name": "page-mapping-visualizer",
   "version": "1.0.0",
-  "description": "",
-  "main": "app.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "description": "Visualizer of tt-metal buffer.hpp page-mapping / allocation behavior (interleaved, ND, legacy sharding).",
+  "main": "page_mapping.js",
   "type": "commonjs",
-  "dependencies": {
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test_page_mapping.js",
+    "test:ui": "node test_ui.js",
+    "test:all": "node build.js && node test_page_mapping.js && node test_ui.js",
+    "serve": "node serve.js"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
     "jsdom": "^29.1.1"
   }
 }

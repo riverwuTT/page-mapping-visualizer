@@ -12,6 +12,16 @@ that `convert_shape_to_pages` does in C++ is assumed already applied).
 Open **`page_mapping_viz.html`** in a browser — it's fully self-contained (no
 network, no server).
 
+## Deploy (GitHub Pages)
+
+Pushing to `main` runs [.github/workflows/pages.yml](.github/workflows/pages.yml),
+which builds the single-file HTML, runs the tests, and publishes it as the site's
+`index.html` via GitHub Pages.
+
+One-time setup: in the repo's **Settings → Pages**, set **Source = GitHub Actions**
+(Pages for a *private* repo requires a GitHub Pro/Team/Enterprise plan; for a Free
+plan the repo must be public).
+
 ## Files
 
 | File | Role |
