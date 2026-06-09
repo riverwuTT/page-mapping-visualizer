@@ -1,0 +1,1345 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Dev shell: references external files. Run `node build.js` to produce the
+     single-file page_mapping_viz.html for sharing. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tt-metal buffer page-mapping visualizer</title>
+    <style>
+:root {
+    --bg: #0f1419;
+    --panel: #161b22;
+    --panel2: #1c2330;
+    --border: #2a3340;
+    --text: #d7dee8;
+    --muted: #8b97a7;
+    --accent: #4ea1ff;
+    --pad: #3a4250;
+    color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+header {
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+}
+header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+header p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+header code { color: var(--accent); }
+
+.layout { display: flex; gap: 0; align-items: stretch; min-height: calc(100vh - 64px); }
+
+#controls {
+    flex: 0 0 290px;
+    padding: 18px;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    overflow-y: auto;
+}
+
+#results { flex: 1 1 auto; padding: 18px 22px; overflow: auto; }
+
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.field input, .field select {
+    width: 100%;
+    padding: 7px 9px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+}
+.field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+.field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+.grp {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+    margin: 20px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+}
+.grp:first-child { margin-top: 0; }
+.badge {
+    font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: 0; font-weight: 400;
+}
+
+.row2 { display: flex; gap: 10px; }
+.row2 .field { flex: 1; }
+
+.preset-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.preset-btns button {
+    font-size: 11px; padding: 4px 8px; background: var(--panel2);
+    border: 1px solid var(--border); border-radius: 5px; color: var(--text); cursor: pointer;
+}
+.preset-btns button:hover { border-color: var(--accent); }
+
+#error {
+    background: #3a1d1d; border: 1px solid #7a3030; color: #ffb4b4;
+    padding: 10px 12px; border-radius: 6px; margin-bottom: 16px; font-size: 13px;
+}
+#error:empty { display: none; }
+
+.summary {
+    display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px;
+}
+.stat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; min-width: 92px;
+}
+.stat .k { font-size: 11px; color: var(--muted); }
+.stat .v { font-size: 17px; font-weight: 600; }
+
+h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 10px; }
+
+/* ---- shards view (compartment 1), arranged as the shard grid ---- */
+.shards { display: grid; gap: 12px; justify-content: start; align-items: start; overflow-x: auto; }
+.shard-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px;
+}
+.shard-hd { font-size: 12px; margin-bottom: 6px; white-space: nowrap; }
+.shard-hd .core { color: var(--muted); }
+
+/* ---- banks view (arranged as the bank grid) ---- */
+.banks { display: grid; gap: 14px; overflow-x: auto; padding-bottom: 8px; justify-content: start; align-items: start; }
+.bank {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px; flex: 0 0 auto;
+}
+.bank-hd { font-size: 12px; margin-bottom: 8px; white-space: nowrap; }
+.bank-hd .core { color: var(--muted); }
+.shard-group { margin-bottom: 8px; }
+.shard-group:last-child { margin-bottom: 0; }
+.shard-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+.cells { display: grid; gap: 2px; }
+
+.cell {
+    width: 30px; height: 24px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10.5px; font-variant-numeric: tabular-nums;
+    color: #0c0f14; cursor: default; user-select: none;
+}
+.cell.pad {
+    background: repeating-linear-gradient(45deg, var(--pad), var(--pad) 4px, #2f3744 4px, #2f3744 8px);
+    color: var(--muted);
+}
+.cell[data-page] { cursor: pointer; }
+
+/* ---- linked click-selection ---- */
+/* when a selection is active, everything dims except the selected pages */
+#results.selecting .cell { filter: grayscale(1); opacity: .18; transition: opacity .08s; }
+#results.selecting .cell.sel {
+    filter: none; opacity: 1;
+    outline: 2px solid #fff; outline-offset: -2px;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, .25);
+    color: #0c0f14;
+}
+
+/* ---- page grid (composition) ---- */
+.pagegrid { display: flex; flex-direction: column; gap: 8px; }
+.pagegrid .cells { width: max-content; }
+
+/* ---- 3D cube toggle + view (experimental) ---- */
+.toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text); cursor: pointer; margin-bottom: 8px; }
+.toggle input { accent-color: var(--accent); }
+.toggle .exp {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #0c0f14;
+    background: var(--e3b341, #e3b341); border-radius: 3px; padding: 1px 5px;
+}
+.cubenote { font-size: 12px; color: #e3b341; margin-bottom: 8px; }
+.cubenote:empty { display: none; }
+
+.cube-stage {
+    position: relative; height: 460px; perspective: 1100px;
+    background: radial-gradient(ellipse at center, #11161d 0%, #0a0d12 100%);
+    border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    cursor: grab; touch-action: none;
+}
+.cube-stage:active { cursor: grabbing; }
+.cube-stage.small { height: 220px; perspective: 760px; }
+.cube-scene { position: absolute; top: 50%; left: 50%; transform-style: preserve-3d; }
+.cube-plane { position: absolute; transform-style: preserve-3d; }
+.cube-plane .cells {
+    padding: 5px; border-radius: 5px;
+    background: rgba(120, 160, 220, .06); outline: 1px solid rgba(120, 160, 220, .25);
+}
+.cube-plane-label { position: absolute; top: -16px; left: 2px; font-size: 11px; color: var(--accent); }
+.cube-hint { position: absolute; bottom: 8px; right: 12px; font-size: 11px; color: var(--muted); pointer-events: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; font-size: 11px; color: var(--muted); }
+.legend .sw { display: inline-flex; align-items: center; gap: 5px; }
+.legend .box { width: 13px; height: 13px; border-radius: 3px; }
+
+.draghint { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+
+/* selection toolbar */
+#selbar { display: none; }
+#selbar.on {
+    display: inline-flex; align-items: center; gap: 12px; margin-bottom: 14px;
+    padding: 6px 12px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px;
+    font-size: 13px;
+}
+#selbar button {
+    font: inherit; padding: 3px 10px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px; cursor: pointer;
+}
+#selbar button:hover { border-color: var(--accent); }
+
+/* shard / bank header toggles */
+[data-toggle] { cursor: pointer; border-radius: 5px; padding: 2px 5px; margin: -2px -5px 6px; }
+[data-toggle]:hover { background: var(--panel2); }
+[data-toggle].active { background: var(--accent); color: #0c0f14; }
+[data-toggle].active .core { color: #0c0f14; }
+.shard-hd .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+</style>
+</head>
+<body>
+    <header>
+        <h1>tt-metal buffer page-mapping visualizer</h1>
+        <p>
+            JS model of <code>buffer.hpp</code>'s allocation behavior, as two compartments:
+            <code>pages → shards</code> (page grid + shard shape) then <code>shards → banks</code>
+            (bank grid + distribution). Named layouts are presets. All values are in <code>pages</code>.
+        </p>
+    </header>
+    <div class="layout">
+        <div id="controls">
+            <div class="field">
+                <label>Presets</label>
+                <div class="preset-btns" id="presets"></div>
+            </div>
+
+            <div class="grp">Sharding model</div>
+            <div class="field">
+                <label>ND vs legacy</label>
+                <select id="shardingFamily">
+                    <option value="nd">ND (BufferDistributionSpec)</option>
+                    <option value="legacy">legacy (classic)</option>
+                    <option value="interleaved">interleaved (not sharded)</option>
+                </select>
+            </div>
+
+            <div class="grp">① pages → shards</div>
+            <div class="field">
+                <label>Page grid (pages) <span class="badge" id="pageCount"></span></label>
+                <input type="text" id="pageGrid" value="4,4" />
+                <div class="hint">how the 1D page list is folded into N-D (row-major). Volume = # pages.</div>
+            </div>
+            <div class="field" id="shardShapeField">
+                <label>Shard shape (pages)</label>
+                <input type="text" id="shardShape" value="2,2" />
+                <div class="hint">same or lower rank than the page grid</div>
+            </div>
+
+            <div class="grp">② shards → banks</div>
+            <div class="row2">
+                <div class="field"><label>Bank grid X</label><input type="number" min="1" step="1" id="bankX" value="2" /></div>
+                <div class="field"><label>Bank grid Y</label><input type="number" min="1" step="1" id="bankY" value="2" /></div>
+            </div>
+            <div class="field" id="ndDistField">
+                <label>ND distribution</label>
+                <select id="distribution">
+                    <option value="round_robin">round-robin (1D, stacks)</option>
+                    <option value="grid_2d">grid (2D, shard grid → bank grid)</option>
+                </select>
+            </div>
+            <div class="field" id="legacyLayoutField" style="display: none">
+                <label>Legacy layout</label>
+                <select id="legacyLayout">
+                    <option value="block">block (2D sub-blocks)</option>
+                    <option value="height">height (contiguous chunks)</option>
+                </select>
+                <div class="hint">classic core_to_host_pages; height chunks the flat page stream</div>
+            </div>
+            <div class="field">
+                <label>Orientation</label>
+                <select id="orientation">
+                    <option value="row_major">row_major</option>
+                    <option value="col_major">col_major</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="results">
+            <div id="error"></div>
+            <div class="summary" id="summary"></div>
+            <div class="draghint">Click a page cell, or a shard / bank header, to toggle its highlight — selected pages light up everywhere and the rest grey out.</div>
+            <div id="selbar"></div>
+
+            <h2 class="section">① pages → shards</h2>
+            <div class="legend" id="shardLegend"></div>
+            <div class="shards" id="shardsView"></div>
+
+            <h2 class="section">② shards → banks (device pages, shards stacked per bank)</h2>
+            <div class="banks" id="banksView"></div>
+
+            <h2 class="section">composition · page grid → bank</h2>
+            <div class="legend" id="pageLegend"></div>
+            <label class="toggle"><input type="checkbox" id="cube3d" /> 3D cube <span class="exp">experimental</span> — render rank-3 page grid &amp; shards as rotatable cubes of layers</label>
+            <div class="cubenote" id="cubeNote"></div>
+            <div id="pageStrip"></div>
+        </div>
+    </div>
+
+    <script>
+// SPDX-License-Identifier: Apache-2.0
+//
+// JavaScript model of tt-metal's buffer page-mapping / allocation behavior,
+// framed as two composable compartments. This is the BufferDistributionSpec
+// model generalized; the named tt-metal layouts are just configurations of it.
+//
+// Inputs:
+//   1. number of input pages  — a flat 1D list 0..N-1.
+//   2. page grid (pages)      — how that 1D list is folded into 2D/ND (row-major).
+//                               Its volume IS the number of pages.
+//   3. bank grid              — how banks / cores are laid out as a 2D grid.
+//
+// Compartment 1  pages -> shards   (page grid, shard shape) -> vector<Shard>
+//   A shard is an N-D vector of page-ids (length = shard volume), row-major
+//   within the shard, padded with a sentinel (null) where it overhangs the grid.
+//   Mirrors iterate_over_shards / iterate_within_shard in buffer_distribution_spec.cpp.
+//
+// Compartment 2  shards -> banks   (shards, bank grid, distribution) -> vector<Bank>
+//   Each bank receives shard(s), stacked into its device-page space.
+//     - round_robin : shard s -> bank (s % numBanks), stacked by floor(s / numBanks).
+//                     (Interleaved == shard volume 1 + round_robin == Buffer::page_address.)
+//     - grid_2d     : 2D shard-grid position -> 2D bank-grid position (classic block).
+//
+// Everything is expressed in pages.
+
+(function (root, factory) {
+    if (typeof module === "object" && module.exports) {
+        module.exports = factory();
+    } else {
+        root.PageMapping = factory();
+    }
+})(typeof self !== "undefined" ? self : this, function () {
+    "use strict";
+
+    // Sentinel for a shard slot that overhangs the page grid (no real page).
+    const PADDING = null;
+
+    const divUp = (a, b) => Math.floor((a + b - 1) / b);
+    const roundUp = (a, b) => divUp(a, b) * b;
+    const align = roundUp;
+    const volume = (shape) => shape.reduce((acc, d) => acc * d, 1);
+
+    // strides[i] = product of dims after i (compute_strides in shape.cpp).
+    function computeStrides(shape) {
+        if (shape.length === 0) return [];
+        let n = volume(shape);
+        if (n === 0) return shape.map(() => 0);
+        const strides = [];
+        for (let i = 0; i < shape.length; i++) {
+            n = Math.floor(n / shape[i]);
+            strides.push(n);
+        }
+        return strides;
+    }
+
+    // Single contiguous bank/core grid at (0,0). rowWise == ROW_MAJOR.
+    function gridToCores(gridX, gridY, rowWise, maxCores) {
+        const cores = [];
+        if (rowWise) {
+            for (let y = 0; y < gridY; y++) for (let x = 0; x < gridX; x++) cores.push({ x, y });
+        } else {
+            for (let x = 0; x < gridX; x++) for (let y = 0; y < gridY; y++) cores.push({ x, y });
+        }
+        if (maxCores != null && cores.length > maxCores) cores.length = maxCores;
+        return cores;
+    }
+
+    // squeeze_shape_ranks: collapse trailing dims that match / divide, so callers
+    // may pass a shard of lower rank. Kept for fidelity; the UI passes equal ranks.
+    const at = (shape, negIdx) => shape[shape.length + negIdx];
+    function squeezeShapeRanks(tensorShape, shardShape) {
+        if (tensorShape.length < shardShape.length) {
+            throw new Error("page-grid rank can't be less than shard rank");
+        }
+        const tVol = volume(tensorShape);
+        const sVol = volume(shardShape);
+        const newT = [];
+        const newS = [];
+        let matching = false;
+        let divisible = false;
+        let curT = 1;
+        let curS = 1;
+        for (let dim = -1; dim >= -shardShape.length; dim--) {
+            const ts = at(tensorShape, dim);
+            const ss = at(shardShape, dim);
+            let merge = false;
+            if (dim < -1) merge = matching || (ss === 1 && divisible);
+            if (merge) {
+                newT[newT.length - 1] *= ts;
+                newS[newS.length - 1] *= ss;
+            } else {
+                newT.push(ts);
+                newS.push(ss);
+                matching = true;
+            }
+            matching = matching && ts === ss;
+            divisible = ts % ss === 0;
+            curT *= ts;
+            curS *= ss;
+            if (curT === tVol && curS === sVol) break;
+        }
+        for (let dim = -shardShape.length - 1; dim >= -tensorShape.length; dim--) {
+            newT[newT.length - 1] *= at(tensorShape, dim);
+        }
+        newT.reverse();
+        newS.reverse();
+        return [newT, newS];
+    }
+
+    // =============================================================================
+    // COMPARTMENT 1:  pages -> shards
+    // =============================================================================
+    // Returns { shards, shardGrid, numShards, shardVolume }.
+    //   shard = { id, gridCoord: [..], shape: [..](full padded shard shape),
+    //             pages: [pageId|PADDING] (length shardVolume, row-major in-shard) }
+    function pagesToShards(pageGrid, shardShape) {
+        // Shard rank may be lower than the page-grid rank; squeeze folds the extra
+        // leading page dims so the two ranks match (mirrors squeeze_shape_ranks).
+        // This does not change the page → shard result, only its representation.
+        if (pageGrid.length < shardShape.length) {
+            throw new Error(
+                `page grid rank (${pageGrid.length}) can't be less than shard rank (${shardShape.length})`
+            );
+        }
+        if (pageGrid.length !== shardShape.length) {
+            [pageGrid, shardShape] = squeezeShapeRanks(pageGrid, shardShape);
+        }
+        const rank = pageGrid.length;
+        if (shardShape.some((d) => d <= 0)) throw new Error("shard dims must be > 0");
+        if (pageGrid.some((d) => d < 0)) throw new Error("page-grid dims must be >= 0");
+
+        const shardVolume = volume(shardShape);
+        const shardGrid = pageGrid.map((p, i) => Math.max(divUp(p, shardShape[i]), 1));
+        const numShards = volume(shardGrid);
+        const pageStrides = computeStrides(pageGrid); // page-id contribution per dim
+        const shardStrides = computeStrides(shardShape); // in-shard slot contribution per dim
+        const actual = new Array(rank).fill(0); // valid extent of the current shard per dim
+
+        const shards = [];
+
+        function iterateWithin(dim, srcOffset, dstOffset, pages) {
+            if (dim === rank) {
+                pages[dstOffset] = srcOffset; // srcOffset is the flat page id
+                return;
+            }
+            for (let i = 0; i < actual[dim]; i++) {
+                iterateWithin(dim + 1, srcOffset, dstOffset, pages);
+                srcOffset += pageStrides[dim];
+                dstOffset += shardStrides[dim];
+            }
+        }
+
+        function iterateOver(dim, srcOffset, gridCoord) {
+            if (dim === rank) {
+                const pages = new Array(shardVolume).fill(PADDING);
+                iterateWithin(0, srcOffset, 0, pages);
+                shards.push({ id: shards.length, gridCoord: gridCoord.slice(), shape: shardShape.slice(), pages });
+                return;
+            }
+            const shardSize = shardShape[dim];
+            for (let i = 0; i < shardGrid[dim]; i++) {
+                const isLast = i === shardGrid[dim] - 1;
+                const partial = pageGrid[dim] % shardSize;
+                actual[dim] = isLast && partial !== 0 ? partial : shardSize;
+                gridCoord.push(i);
+                iterateOver(dim + 1, srcOffset + i * shardSize * pageStrides[dim], gridCoord);
+                gridCoord.pop();
+            }
+        }
+
+        if (volume(pageGrid) !== 0) iterateOver(0, 0, []);
+        // pageGrid / shardShape returned are the (possibly squeezed) shapes the
+        // partition actually used; shards carry the same squeezed shard shape.
+        return { shards, shardGrid, numShards, shardVolume, pageGrid, shardShape };
+    }
+
+    // =============================================================================
+    // COMPARTMENT 2:  shards -> banks
+    // =============================================================================
+    function bankIdToCoord(id, bankGrid, rowMajor) {
+        return rowMajor
+            ? { x: id % bankGrid.x, y: Math.floor(id / bankGrid.x) }
+            : { x: Math.floor(id / bankGrid.y), y: id % bankGrid.y };
+    }
+    function bankCoordToId(x, y, bankGrid, rowMajor) {
+        return rowMajor ? y * bankGrid.x + x : x * bankGrid.y + y;
+    }
+
+    // Returns { banks, numBanks }.
+    //   bank = { bankId, gridCoord:{x,y}, shardIds:[..],
+    //            devicePages:[{ devicePage, pageId|PADDING, shardId, shardLocalOffset }] }
+    function shardsToBanks(compart1, bankGrid, distribution, orientation) {
+        const rowMajor = orientation !== "col_major";
+        const numBanks = bankGrid.x * bankGrid.y;
+        if (numBanks <= 0) throw new Error("bank grid must have at least one bank");
+        const { shards, shardGrid, shardVolume } = compart1;
+
+        const banks = [];
+        for (let b = 0; b < numBanks; b++) {
+            banks.push({ bankId: b, gridCoord: bankIdToCoord(b, bankGrid, rowMajor), shardIds: [] });
+        }
+
+        if (distribution === "grid_2d") {
+            if (shardGrid.length !== 2) {
+                throw new Error("2D-grid distribution needs a rank-2 page/shard shape");
+            }
+            const [rows, cols] = shardGrid; // dim0 = rows, dim1 = cols
+            const needX = rowMajor ? cols : rows;
+            const needY = rowMajor ? rows : cols;
+            if (needX > bankGrid.x || needY > bankGrid.y) {
+                throw new Error(
+                    `shard grid ${rows}x${cols} doesn't fit bank grid ${bankGrid.x}x${bankGrid.y}`
+                );
+            }
+            for (const shard of shards) {
+                const [sr, sc] = shard.gridCoord;
+                const x = rowMajor ? sc : sr;
+                const y = rowMajor ? sr : sc;
+                banks[bankCoordToId(x, y, bankGrid, rowMajor)].shardIds.push(shard.id);
+            }
+        } else {
+            // round_robin (ROUND_ROBIN_1D)
+            for (const shard of shards) {
+                banks[shard.id % numBanks].shardIds.push(shard.id);
+            }
+        }
+
+        // Lay assigned shards into each bank's device-page space (stacked in order).
+        const pageLookup = [];
+        for (const bank of banks) {
+            bank.devicePages = [];
+            let devicePage = 0;
+            for (const sid of bank.shardIds) {
+                const shard = shards[sid];
+                for (let off = 0; off < shard.pages.length; off++) {
+                    const pageId = shard.pages[off];
+                    bank.devicePages.push({
+                        devicePage,
+                        pageId,
+                        shardId: sid,
+                        shardLocalOffset: off,
+                    });
+                    if (pageId != null) {
+                        pageLookup[pageId] = { bankId: bank.bankId, devicePage, shardId: sid, shardLocalOffset: off };
+                    }
+                    devicePage++;
+                }
+            }
+        }
+
+        return { banks, numBanks, pageLookup };
+    }
+
+    // =============================================================================
+    // LEGACY (classic) SHARDING  — distinct emplacement from ND
+    // =============================================================================
+    // Ports core_to_host_pages (buffer.cpp): the page → shard assignment for the
+    // classic HEIGHT / WIDTH / BLOCK layouts.
+    //   - HEIGHT chops the flat row-major page stream into CONTIGUOUS chunks of
+    //     shard-volume pages (page_id++), regardless of the tensor width. This is
+    //     the key difference from ND, which gathers an N-D strided sub-block.
+    //   - WIDTH / BLOCK share one 2D strided-gather branch (same content as ND).
+    // Returns per-shard host-page lists + each shard's actual (valid) [rows, cols].
+    function coreToHostPages(layout, numShards, shardInPages, tensor2d) {
+        const retVec = [];
+        const retShardShape = [];
+        for (let i = 0; i < numShards; i++) {
+            retVec.push([]);
+            retShardShape.push([shardInPages[0], shardInPages[1]]);
+        }
+        const pagesPerShard = shardInPages[0] * shardInPages[1];
+
+        if (layout === "height") {
+            let remPages = tensor2d[0] * tensor2d[1];
+            let pageId = 0;
+            for (let i = 0; i < numShards; i++) {
+                if (remPages === 0) {
+                    retShardShape[i] = [0, 0];
+                } else {
+                    const numCols = Math.min(pagesPerShard, remPages);
+                    if (pagesPerShard > remPages) {
+                        retShardShape[i] = [Math.floor(remPages / shardInPages[1]), shardInPages[1]];
+                    }
+                    for (let j = 0; j < numCols; j++) retVec[i].push(pageId++);
+                    remPages -= numCols;
+                }
+            }
+        } else {
+            const numShardColumns = shardInPages[1] === 0 ? 0 : divUp(tensor2d[1], shardInPages[1]);
+            let iOffset = 0;
+            let jOffset = 0;
+            let shardInRow = 0;
+            for (let shardIdx = 0; shardIdx < numShards; shardIdx++) {
+                let i = 0;
+                let j = 0;
+                for (i = iOffset; i < shardInPages[0] + iOffset; i++) {
+                    if (i >= tensor2d[0]) break;
+                    for (j = jOffset; j < shardInPages[1] + jOffset && j < tensor2d[1]; j++) {
+                        retVec[shardIdx].push(i * tensor2d[1] + j);
+                    }
+                }
+                retShardShape[shardIdx] = [i - iOffset, j - jOffset];
+                if (shardInRow + 1 === numShardColumns) {
+                    shardInRow = 0;
+                    jOffset = 0;
+                    iOffset += shardInPages[0];
+                } else {
+                    shardInRow++;
+                    jOffset += shardInPages[1];
+                }
+            }
+        }
+        return { retVec, retShardShape };
+    }
+
+    // Full legacy pipeline: pages -> shards (core_to_host_pages, re-laid into each
+    // shard's padded 2D grid by generate_buffer_page_mapping) -> banks (exactly one
+    // shard per bank, shard i -> bank i in row/col-major order).
+    function computeLegacy(cfg) {
+        const layout = cfg.legacyLayout || "block";
+        const tensor2d = cfg.pageGrid;
+        const shardInPages = cfg.shardShape;
+        if (tensor2d.length !== 2 || shardInPages.length !== 2) {
+            throw new Error("legacy sharding needs a rank-2 page grid and shard shape");
+        }
+        const [H, W] = tensor2d;
+        const [sh, sw] = shardInPages;
+        if (sh <= 0 || sw <= 0) throw new Error("shard dims must be > 0");
+        const shardPages = sh * sw;
+
+        let numShards;
+        let shardGrid;
+        if (layout === "height") {
+            numShards = Math.max(divUp(H * W, shardPages), 1);
+            shardGrid = [numShards, 1];
+        } else {
+            const rows = Math.max(divUp(H, sh), 1);
+            const cols = Math.max(divUp(W, sw), 1);
+            numShards = rows * cols;
+            shardGrid = [rows, cols];
+        }
+
+        const rowMajor = (cfg.orientation || "row_major") !== "col_major";
+        const numBanks = cfg.bankGrid.x * cfg.bankGrid.y;
+        if (numBanks < numShards) {
+            throw new Error(
+                `legacy ${layout} needs ${numShards} banks (one shard per bank) but bank grid has ${numBanks}`
+            );
+        }
+
+        const { retVec, retShardShape } = coreToHostPages(layout, numShards, shardInPages, tensor2d);
+
+        // generate_buffer_page_mapping: re-lay each shard into its padded [sh, sw] grid.
+        const shards = [];
+        const cols = shardGrid[shardGrid.length - 1];
+        for (let c = 0; c < numShards; c++) {
+            const padded = new Array(shardPages).fill(PADDING);
+            let valid = 0;
+            for (let sx = 0; sx < sh; sx++) {
+                for (let sy = 0; sy < sw; sy++) {
+                    if (sx < retShardShape[c][0] && sy < retShardShape[c][1]) {
+                        padded[sx * sw + sy] = retVec[c][valid++];
+                    }
+                }
+            }
+            const gridCoord = layout === "height" ? [c, 0] : [Math.floor(c / cols), c % cols];
+            shards.push({ id: c, gridCoord, shape: [sh, sw], pages: padded });
+        }
+
+        // one shard per bank, sequential (shard i -> bank i)
+        const banks = [];
+        for (let b = 0; b < numBanks; b++) {
+            banks.push({ bankId: b, gridCoord: bankIdToCoord(b, cfg.bankGrid, rowMajor), shardIds: [] });
+        }
+        for (let c = 0; c < numShards; c++) banks[c].shardIds.push(c);
+
+        const pageLookup = [];
+        for (const bank of banks) {
+            bank.devicePages = [];
+            let dp = 0;
+            for (const sid of bank.shardIds) {
+                const shard = shards[sid];
+                for (let off = 0; off < shard.pages.length; off++) {
+                    const pageId = shard.pages[off];
+                    bank.devicePages.push({ devicePage: dp, pageId, shardId: sid, shardLocalOffset: off });
+                    if (pageId != null) {
+                        pageLookup[pageId] = { bankId: bank.bankId, devicePage: dp, shardId: sid, shardLocalOffset: off };
+                    }
+                    dp++;
+                }
+            }
+        }
+
+        return { shards, shardGrid, numShards, shardVolume: shardPages, banks, numBanks, pageLookup, layout };
+    }
+
+    // =============================================================================
+    // INTERLEAVED  — its own layout (TensorMemoryLayout::INTERLEAVED, not sharded).
+    // =============================================================================
+    // Every page is its own unit; pages round-robin across banks:
+    //   page p -> bank (p % numBanks), device slot floor(p / numBanks).
+    // (ND with a volume-1 shard reproduces this, but interleaved is its own thing.)
+    function computeInterleaved(cfg) {
+        const numPages = volume(cfg.pageGrid);
+        const rowMajor = (cfg.orientation || "row_major") !== "col_major";
+        const numBanks = cfg.bankGrid.x * cfg.bankGrid.y;
+        if (numBanks <= 0) throw new Error("bank grid must have at least one bank");
+
+        // each page is a 1-page unit ("shard" of volume 1)
+        const shards = [];
+        for (let p = 0; p < numPages; p++) {
+            shards.push({ id: p, gridCoord: [p], shape: [1], pages: [p] });
+        }
+
+        const banks = [];
+        for (let b = 0; b < numBanks; b++) {
+            banks.push({ bankId: b, gridCoord: bankIdToCoord(b, cfg.bankGrid, rowMajor), shardIds: [], devicePages: [] });
+        }
+        const pageLookup = [];
+        for (let p = 0; p < numPages; p++) {
+            const b = p % numBanks;
+            const slot = Math.floor(p / numBanks);
+            banks[b].shardIds.push(p);
+            banks[b].devicePages.push({ devicePage: slot, pageId: p, shardId: p, shardLocalOffset: 0 });
+            pageLookup[p] = { bankId: b, devicePage: slot, shardId: p, shardLocalOffset: 0 };
+        }
+
+        return { shards, shardGrid: [numPages], numShards: numPages, shardVolume: 1, banks, numBanks, pageLookup };
+    }
+
+    // =============================================================================
+    // PUBLIC ENTRY:  pages -> shards -> banks
+    // =============================================================================
+    // cfg = { pageGrid:[..], shardShape:[..], bankGrid:{x,y},
+    //         distribution:"round_robin"|"grid_2d", orientation:"row_major"|"col_major" }
+    function computeMapping(cfg) {
+        const pageGrid = cfg.pageGrid.slice();
+        const shardShape = cfg.shardShape.slice();
+        const distribution = cfg.distribution || "round_robin";
+        const orientation = cfg.orientation || "row_major";
+
+        if (distribution === "interleaved") {
+            const I = computeInterleaved({ ...cfg, pageGrid, orientation });
+            return {
+                pageGrid,
+                shardShape: [1],
+                inputShardShape: [1],
+                squeezed: false,
+                squeezedPageGrid: pageGrid,
+                bankGrid: cfg.bankGrid,
+                distribution,
+                orientation,
+                numPages: volume(pageGrid),
+                shardGrid: I.shardGrid,
+                numShards: I.numShards,
+                shardVolume: I.shardVolume,
+                shards: I.shards,
+                banks: I.banks,
+                numBanks: I.numBanks,
+                pageLookup: I.pageLookup,
+            };
+        }
+
+        if (distribution === "legacy") {
+            const L = computeLegacy({ ...cfg, pageGrid, shardShape, orientation });
+            return {
+                pageGrid,
+                shardShape,
+                inputShardShape: shardShape,
+                squeezed: false,
+                squeezedPageGrid: pageGrid,
+                bankGrid: cfg.bankGrid,
+                distribution,
+                orientation,
+                legacyLayout: L.layout,
+                numPages: volume(pageGrid),
+                shardGrid: L.shardGrid,
+                numShards: L.numShards,
+                shardVolume: L.shardVolume,
+                shards: L.shards,
+                banks: L.banks,
+                numBanks: L.numBanks,
+                pageLookup: L.pageLookup,
+            };
+        }
+
+        const c1 = pagesToShards(pageGrid, shardShape);
+        const c2 = shardsToBanks(c1, cfg.bankGrid, distribution, orientation);
+
+        const numPages = volume(pageGrid);
+        const squeezed = c1.pageGrid.length !== pageGrid.length;
+        return {
+            pageGrid, // original, as entered — drives the composition view layout
+            shardShape: c1.shardShape, // effective (squeezed) shard shape; matches `shards`
+            inputShardShape: shardShape, // as entered
+            squeezed, // true when shard rank < page-grid rank (shapes were folded)
+            squeezedPageGrid: c1.pageGrid,
+            bankGrid: cfg.bankGrid,
+            distribution,
+            orientation,
+            numPages,
+            shardGrid: c1.shardGrid,
+            numShards: c1.numShards,
+            shardVolume: c1.shardVolume,
+            shards: c1.shards,
+            banks: c2.banks,
+            numBanks: c2.numBanks,
+            pageLookup: c2.pageLookup,
+        };
+    }
+
+    return {
+        computeMapping,
+        pagesToShards,
+        shardsToBanks,
+        computeLegacy,
+        coreToHostPages,
+        computeInterleaved,
+        squeezeShapeRanks,
+        computeStrides,
+        gridToCores,
+        divUp,
+        roundUp,
+        align,
+        volume,
+        PADDING,
+    };
+});
+</script>
+    <script>
+// SPDX-License-Identifier: Apache-2.0
+// Visualizer UI for the two-compartment page-mapping model. Depends on the
+// global `PageMapping` (page_mapping.js). All inputs are expressed in pages.
+//
+//   Compartment 1: pages -> shards   (page grid + shard shape)
+//   Compartment 2: shards -> banks   (bank grid + distribution)
+
+(function () {
+    "use strict";
+    const PM = window.PageMapping;
+
+    // Named tt-metal layouts are just settings of the two compartments.
+    const PRESETS = [
+        ["Interleaved", { pageGrid: "20", shardShape: "1", bankX: 6, bankY: 1, distribution: "interleaved", orientation: "row_major" }],
+        ["Height", { pageGrid: "8,2", shardShape: "2,2", bankX: 1, bankY: 4, distribution: "round_robin", orientation: "row_major" }],
+        ["Block / grid", { pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2, distribution: "grid_2d", orientation: "row_major" }],
+        ["Block (partial)", { pageGrid: "5,5", shardShape: "2,2", bankX: 3, bankY: 3, distribution: "grid_2d", orientation: "row_major" }],
+        ["ND stacked", { pageGrid: "4,4", shardShape: "2,2", bankX: 1, bankY: 2, distribution: "round_robin", orientation: "row_major" }],
+        ["ND rank-3", { pageGrid: "2,4,4", shardShape: "1,2,2", bankX: 2, bankY: 2, distribution: "round_robin", orientation: "row_major" }],
+        ["Legacy height", { pageGrid: "4,4", shardShape: "2,2", bankX: 4, bankY: 1, distribution: "legacy", legacyLayout: "height", orientation: "row_major" }],
+        ["Legacy block", { pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2, distribution: "legacy", legacyLayout: "block", orientation: "row_major" }],
+    ];
+
+    const el = (id) => document.getElementById(id);
+    const dom = {
+        pageGrid: el("pageGrid"),
+        pageCount: el("pageCount"),
+        shardShape: el("shardShape"),
+        shardShapeField: el("shardShapeField"),
+        bankX: el("bankX"),
+        bankY: el("bankY"),
+        shardingFamily: el("shardingFamily"),
+        distribution: el("distribution"),
+        ndDistField: el("ndDistField"),
+        legacyLayout: el("legacyLayout"),
+        legacyLayoutField: el("legacyLayoutField"),
+        orientation: el("orientation"),
+        presets: el("presets"),
+        error: el("error"),
+        summary: el("summary"),
+        shardsView: el("shardsView"),
+        shardLegend: el("shardLegend"),
+        banksView: el("banksView"),
+        pageLegend: el("pageLegend"),
+        pageStrip: el("pageStrip"),
+        results: el("results"),
+        selbar: el("selbar"),
+        cube3d: el("cube3d"),
+        cubeNote: el("cubeNote"),
+    };
+
+    // 3D cube rotation state (experimental rank-3 view). All cube scenes on the
+    // page (the page grid + every rank-3 shard) share one orientation.
+    const cubeScenes = [];
+    let rotX = -20;
+    let rotY = -28;
+    let dragging3d = false;
+    let dragRotated = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    // ---- linked selection: click a page / shard / bank to toggle its highlight.
+    // Selected pages light up in every view; everything else greys out. ----
+    const cellsByPage = new Map(); // pageId -> [cell elements across all views]
+    const groupToggles = []; // { el, pages } for each shard / bank header toggle
+    let selection = new Set(); // selected pageIds
+    let selectedCells = []; // cells currently carrying .sel
+
+    function registerCell(cell, pageId) {
+        cell.dataset.page = pageId;
+        let arr = cellsByPage.get(pageId);
+        if (!arr) cellsByPage.set(pageId, (arr = []));
+        arr.push(cell);
+    }
+    // Make a header element toggle the highlight of a whole group of pages.
+    function registerToggle(el, pages) {
+        el.dataset.toggle = "1";
+        el._pages = pages;
+        groupToggles.push({ el, pages });
+    }
+    function applySelection() {
+        selectedCells.forEach((c) => c.classList.remove("sel"));
+        selectedCells = [];
+        dom.results.classList.toggle("selecting", selection.size > 0);
+        selection.forEach((pid) => {
+            const arr = cellsByPage.get(pid);
+            if (arr)
+                arr.forEach((c) => {
+                    c.classList.add("sel");
+                    selectedCells.push(c);
+                });
+        });
+        // a shard/bank toggle reads "active" when all of its pages are selected
+        for (const { el, pages } of groupToggles) {
+            el.classList.toggle("active", pages.length > 0 && pages.every((p) => selection.has(p)));
+        }
+        updateSelbar();
+    }
+    function togglePage(p) {
+        selection.has(p) ? selection.delete(p) : selection.add(p);
+        applySelection();
+    }
+    function togglePages(pages) {
+        if (!pages.length) return;
+        const allOn = pages.every((p) => selection.has(p));
+        pages.forEach((p) => (allOn ? selection.delete(p) : selection.add(p)));
+        applySelection();
+    }
+    function clearSelection() {
+        selection.clear();
+        applySelection();
+    }
+    function updateSelbar() {
+        if (selection.size === 0) {
+            dom.selbar.classList.remove("on");
+            dom.selbar.innerHTML = "";
+            return;
+        }
+        dom.selbar.classList.add("on");
+        dom.selbar.innerHTML = `<span>${selection.size} page${selection.size === 1 ? "" : "s"} selected</span>`;
+        const btn = document.createElement("button");
+        btn.textContent = "Clear";
+        btn.onclick = clearSelection;
+        dom.selbar.appendChild(btn);
+    }
+
+    const PALETTE = [
+        "#4ea1ff", "#ff7b72", "#7ee787", "#ffa657", "#d2a8ff", "#79c0ff",
+        "#f0883e", "#56d364", "#ff9bce", "#e3b341", "#a5d6ff", "#ffab70",
+    ];
+    const colorFor = (i) => PALETTE[((i % PALETTE.length) + PALETTE.length) % PALETTE.length];
+
+    function div(cls) {
+        const d = document.createElement("div");
+        if (cls) d.className = cls;
+        return d;
+    }
+    const parseShape = (s) => {
+        const parts = String(s).split(",").map((x) => x.trim()).filter((x) => x.length);
+        if (!parts.length) throw new Error("empty shape");
+        return parts.map((x) => {
+            const n = parseInt(x, 10);
+            if (!Number.isFinite(n)) throw new Error(`invalid shape entry: "${x}"`);
+            return n;
+        });
+    };
+    const intOf = (inp) => {
+        const n = parseInt(inp.value, 10);
+        if (!Number.isFinite(n)) throw new Error(`invalid number: "${inp.value}"`);
+        return n;
+    };
+
+    // A single shard slot cell (page id, or "·" for a padding slot). `colorIdx`
+    // tints real-page fills; `devBase` (if given) adds the device page to the title.
+    function shardCellEl(shard, off, colorIdx, devBase) {
+        const pageId = shard.pages[off];
+        const c = div("cell");
+        if (pageId == null) {
+            c.className = "cell pad";
+            c.textContent = "·";
+            c.title = `shard ${shard.id}, slot ${off}\n(padding — overhangs page grid)`;
+        } else {
+            c.style.background = colorFor(colorIdx);
+            c.textContent = pageId;
+            c.title =
+                `page ${pageId}\nshard ${shard.id}, slot ${off}` +
+                (devBase != null ? `\ndevice page ${devBase + off}` : "");
+            registerCell(c, pageId);
+        }
+        return c;
+    }
+
+    // A shard rendered as its row-major 2D grid: cols = last dim, rows = the rest.
+    function shardGridEl(shard, colorIdx, devBase) {
+        const cols = shard.shape[shard.shape.length - 1];
+        const g = div("cells");
+        g.style.gridTemplateColumns = `repeat(${cols}, 30px)`;
+        for (let off = 0; off < shard.pages.length; off++) {
+            g.appendChild(shardCellEl(shard, off, colorIdx, devBase));
+        }
+        return g;
+    }
+
+    // A rank-3 thing ([d0,d1,d2]) rendered as a rotatable stack of d0 layer
+    // planes, each d1 × d2. `makeCell(i)` builds the cell for linear slot i.
+    // All cubes share one orientation (cubeScenes) so dragging any rotates all.
+    function buildCube([d0, d1, d2], makeCell, cellPx) {
+        const stage = div("cube-stage" + (cellPx < 30 ? " small" : ""));
+        const scene = div("cube-scene");
+        scene.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        cubeScenes.push(scene);
+        const planeGap = cellPx < 30 ? 64 : 96;
+        for (let z = 0; z < d0; z++) {
+            const plane = div("cube-plane");
+            plane.style.transform = `translate(-50%, -50%) translateZ(${(z - (d0 - 1) / 2) * planeGap}px)`;
+            const lab = div("cube-plane-label");
+            lab.textContent = `z = ${z}`;
+            plane.appendChild(lab);
+            const grid = div("cells");
+            grid.style.gridTemplateColumns = `repeat(${d2}, ${cellPx}px)`;
+            for (let i = 0; i < d1 * d2; i++) grid.appendChild(makeCell(z * d1 * d2 + i));
+            plane.appendChild(grid);
+            scene.appendChild(plane);
+        }
+        stage.appendChild(scene);
+        stage.addEventListener("mousedown", (e) => {
+            dragging3d = true;
+            dragRotated = false;
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+        return stage;
+    }
+
+    // A rank-3 shard rendered as a small cube.
+    function shardCubeEl(shard) {
+        return buildCube(shard.shape, (off) => shardCellEl(shard, off, shard.id, null), 24);
+    }
+
+    function buildPresets() {
+        dom.presets.innerHTML = "";
+        for (const [name, vals] of PRESETS) {
+            const b = document.createElement("button");
+            b.textContent = name;
+            b.onclick = () => {
+                dom.pageGrid.value = vals.pageGrid;
+                dom.shardShape.value = vals.shardShape;
+                dom.bankX.value = vals.bankX;
+                dom.bankY.value = vals.bankY;
+                const fam =
+                    vals.distribution === "legacy" ? "legacy" : vals.distribution === "interleaved" ? "interleaved" : "nd";
+                dom.shardingFamily.value = fam;
+                dom.distribution.value = fam === "nd" ? vals.distribution : "round_robin";
+                dom.legacyLayout.value = vals.legacyLayout || "block";
+                dom.orientation.value = vals.orientation;
+                render();
+            };
+            dom.presets.appendChild(b);
+        }
+    }
+
+    function render() {
+        dom.error.textContent = "";
+        cellsByPage.clear();
+        groupToggles.length = 0;
+        cubeScenes.length = 0;
+        selection.clear();
+        selectedCells = [];
+        const family = dom.shardingFamily.value; // nd | legacy | interleaved
+        const isLegacy = family === "legacy";
+        const isInterleaved = family === "interleaved";
+        dom.legacyLayoutField.style.display = isLegacy ? "" : "none";
+        dom.ndDistField.style.display = family === "nd" ? "" : "none";
+        dom.shardShapeField.style.display = isInterleaved ? "none" : "";
+        let res;
+        try {
+            const cfg = {
+                pageGrid: parseShape(dom.pageGrid.value),
+                shardShape: isInterleaved ? [1] : parseShape(dom.shardShape.value),
+                bankGrid: { x: intOf(dom.bankX), y: intOf(dom.bankY) },
+                distribution: isInterleaved ? "interleaved" : isLegacy ? "legacy" : dom.distribution.value,
+                legacyLayout: dom.legacyLayout.value,
+                orientation: dom.orientation.value,
+            };
+            dom.pageCount.textContent = `= ${PM.volume(cfg.pageGrid)} pages`;
+            res = PM.computeMapping(cfg);
+        } catch (e) {
+            dom.error.textContent = e.message;
+            dom.summary.innerHTML = "";
+            dom.shardsView.innerHTML = "";
+            dom.shardLegend.innerHTML = "";
+            dom.banksView.innerHTML = "";
+            dom.pageStrip.innerHTML = "";
+            return;
+        }
+        renderSummary(res);
+        renderShards(res);
+        renderBanks(res);
+        renderPageStrip(res);
+        applySelection(); // selection was reset; clears any stale highlight/toolbar
+    }
+
+    const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+    function renderSummary(res) {
+        if (res.distribution === "interleaved") {
+            dom.summary.innerHTML =
+                stat("Pages", res.numPages) +
+                stat("Banks", res.numBanks) +
+                stat("Pages/bank (max)", Math.ceil(res.numPages / res.numBanks)) +
+                stat("Layout", "interleaved");
+            return;
+        }
+        const pad = res.banks.reduce((a, b) => a + b.devicePages.filter((d) => d.pageId == null).length, 0);
+        let s =
+            stat("Pages", res.numPages) +
+            stat("Shard grid", res.shardGrid.join(" × ")) +
+            stat("Shards", res.numShards) +
+            stat("Shard volume", res.shardVolume) +
+            stat("Banks", res.numBanks) +
+            stat("Padding slots", pad);
+        // shard rank < page-grid rank -> shapes were folded (squeeze_shape_ranks)
+        if (res.squeezed) {
+            s += stat("Squeezed", `[${res.inputShardShape}] → page [${res.squeezedPageGrid}] / shard [${res.shardShape}]`);
+        }
+        dom.summary.innerHTML = s;
+    }
+
+    function renderShards(res) {
+        dom.shardsView.innerHTML = "";
+        dom.shardsView.style.gridTemplateColumns = "";
+        if (res.distribution === "interleaved") {
+            // interleaved isn't sharded — skip the (numPages) trivial 1-page cards.
+            dom.shardLegend.innerHTML = "";
+            const note = div("draghint");
+            note.textContent =
+                "Interleaved is not sharded — each page is its own unit; pages round-robin across banks (below).";
+            dom.shardsView.appendChild(note);
+            return;
+        }
+        // Arrange shard cards in the shard grid (shard id is row-major over it).
+        const cols = res.shardGrid[res.shardGrid.length - 1] || 1;
+        dom.shardsView.style.gridTemplateColumns = `repeat(${cols}, max-content)`;
+        for (const shard of res.shards) {
+            const card = div("shard-card");
+            card.style.gridColumnStart = (shard.id % cols) + 1;
+            card.style.gridRowStart = Math.floor(shard.id / cols) + 1;
+            const hd = div("shard-hd");
+            hd.innerHTML =
+                `<span class="dot" style="background:${colorFor(shard.id)}"></span>` +
+                `shard ${shard.id} <span class="core">@[${shard.gridCoord}] · ${shard.shape.join("×")}</span>`;
+            registerToggle(hd, shard.pages.filter((p) => p != null));
+            card.appendChild(hd);
+            const use3d = dom.cube3d.checked && shard.shape.length === 3;
+            card.appendChild(use3d ? shardCubeEl(shard) : shardGridEl(shard, shard.id, null));
+            dom.shardsView.appendChild(card);
+        }
+        // legend
+        const n = Math.min(res.numShards, 12);
+        let items = "";
+        for (let i = 0; i < n; i++) {
+            items += `<span class="sw"><span class="box" style="background:${colorFor(i)}"></span>shard ${i}</span>`;
+        }
+        if (res.numShards > 12) items += `<span class="sw">… (color = shard mod 12)</span>`;
+        dom.shardLegend.innerHTML = `<span style="color:var(--muted)">color = shard:</span>${items}`;
+    }
+
+    function renderBanks(res) {
+        dom.banksView.innerHTML = "";
+        const interleaved = res.distribution === "interleaved";
+        // Arrange the bank cells as the bank grid: bank (x,y) sits at column x, row y.
+        dom.banksView.style.gridTemplateColumns = `repeat(${res.bankGrid.x}, max-content)`;
+        for (const bank of res.banks) {
+            const col = div("bank");
+            col.style.gridColumnStart = bank.gridCoord.x + 1;
+            col.style.gridRowStart = bank.gridCoord.y + 1;
+            const hd = div("bank-hd");
+            hd.innerHTML = `bank ${bank.bankId} <span class="core">(${bank.gridCoord.x},${bank.gridCoord.y})</span>`;
+            col.appendChild(hd);
+
+            if (interleaved) {
+                // a column of the bank's pages (one per device slot), colored by bank
+                const grid = div("cells");
+                grid.style.gridTemplateColumns = "repeat(1, 30px)";
+                const pages = [];
+                for (const d of bank.devicePages) {
+                    const c = div("cell");
+                    c.style.background = colorFor(bank.bankId);
+                    c.textContent = d.pageId;
+                    c.title = `page ${d.pageId}\nbank ${bank.bankId} (${bank.gridCoord.x},${bank.gridCoord.y})\ndevice slot ${d.devicePage}`;
+                    registerCell(c, d.pageId);
+                    grid.appendChild(c);
+                    pages.push(d.pageId);
+                }
+                col.appendChild(grid);
+                registerToggle(hd, pages);
+                dom.banksView.appendChild(col);
+                continue;
+            }
+            if (bank.shardIds.length === 0) {
+                const e = div("shard-label");
+                e.textContent = "(empty)";
+                col.appendChild(e);
+            }
+            // device pages are the assigned shards stacked in order
+            const bankPages = [];
+            let devBase = 0;
+            for (const sid of bank.shardIds) {
+                const shard = res.shards[sid];
+                const g = div("shard-group");
+                const lab = div("shard-label");
+                lab.textContent = `shard ${sid} · dev ${devBase}–${devBase + shard.pages.length - 1}`;
+                g.appendChild(lab);
+                g.appendChild(shardGridEl(shard, sid, devBase));
+                col.appendChild(g);
+                devBase += shard.pages.length;
+                shard.pages.forEach((p) => p != null && bankPages.push(p));
+            }
+            registerToggle(hd, bankPages);
+            dom.banksView.appendChild(col);
+        }
+    }
+
+    // Pages laid out in their grid form (row-major reshape of the page grid),
+    // colored by the bank each lands in. cols = last grid dim; higher dims stack
+    // as successive blocks of rows, with a separator between the slowest-varying
+    // blocks so N-D grids stay readable.
+    function renderPageStrip(res) {
+        dom.pageStrip.innerHTML = "";
+        // legend: color = destination bank
+        const nb = Math.min(res.numBanks, 12);
+        let leg = "";
+        for (let i = 0; i < nb; i++) {
+            const bc = res.banks[i].gridCoord;
+            leg += `<span class="sw"><span class="box" style="background:${colorFor(i)}"></span>bank ${i} (${bc.x},${bc.y})</span>`;
+        }
+        if (res.numBanks > 12) leg += `<span class="sw">… (color = bank mod 12)</span>`;
+        dom.pageLegend.innerHTML = `<span style="color:var(--muted)">color = destination bank:</span>${leg}`;
+
+        // The page-grid cube depends on the page grid's own rank; shards cube
+        // independently on each shard's rank (see renderShards).
+        const use3d = dom.cube3d.checked && res.pageGrid.length === 3;
+        dom.cubeNote.textContent =
+            dom.cube3d.checked && res.pageGrid.length !== 3
+                ? `3D cube renders rank-3 components; this page grid is rank-${res.pageGrid.length}.`
+                : "";
+        if (use3d) {
+            renderPageCube(res);
+            return;
+        }
+
+        const shape = res.pageGrid;
+        const cols = shape[shape.length - 1] || res.numPages || 1;
+        // size of one slowest-varying block (everything but dim 0), in pages
+        const blockSize = shape.length > 2 ? res.numPages / shape[0] : res.numPages;
+        const wrap = div("pagegrid");
+        let grid = null;
+        for (let p = 0; p < res.numPages; p++) {
+            if (p % blockSize === 0) {
+                grid = div("cells");
+                grid.style.gridTemplateColumns = `repeat(${cols}, 30px)`;
+                wrap.appendChild(grid);
+            }
+            grid.appendChild(pageCellEl(res, p));
+        }
+        dom.pageStrip.appendChild(wrap);
+    }
+
+    // A single page cell for the composition views, colored by destination bank.
+    function pageCellEl(res, p) {
+        const lk = res.pageLookup[p];
+        const c = div("cell");
+        if (!lk) {
+            c.className = "cell pad";
+            c.textContent = p;
+        } else {
+            c.style.background = colorFor(lk.bankId);
+            c.textContent = p;
+            const bc = res.banks[lk.bankId].gridCoord;
+            c.title =
+                `page ${p}\n→ bank ${lk.bankId} (${bc.x},${bc.y})\n` +
+                `device page ${lk.devicePage} · shard ${lk.shardId}`;
+            registerCell(c, p);
+        }
+        return c;
+    }
+
+    // Experimental: render a rank-3 page grid as a rotatable stack of layer
+    // planes (a "cube"). z = dim 0; each plane is the dim1 × dim2 grid. Cells are
+    // the same page cells used elsewhere, so highlight / selection works in 3D.
+    function renderPageCube(res) {
+        const stage = buildCube(res.pageGrid, (p) => pageCellEl(res, p), 30);
+        const hint = div("cube-hint");
+        hint.textContent = "drag to rotate";
+        stage.appendChild(hint);
+        dom.pageStrip.appendChild(stage);
+    }
+
+    // ---- click to toggle: a page cell, or a whole shard / bank header ----
+    dom.results.addEventListener("click", (e) => {
+        if (dragRotated) {
+            dragRotated = false; // this "click" was the end of a cube rotation
+            return;
+        }
+        const cell = e.target.closest(".cell[data-page]");
+        if (cell) {
+            togglePage(+cell.dataset.page);
+            return;
+        }
+        const tog = e.target.closest("[data-toggle]");
+        if (tog && tog._pages) togglePages(tog._pages);
+    });
+
+    // ---- drag anywhere to rotate the 3D cube ----
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging3d || !cubeScenes.length) return;
+        const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        rotY += dx * 0.4;
+        rotX = Math.max(-89, Math.min(89, rotX - dy * 0.4));
+        if (Math.abs(dx) + Math.abs(dy) > 2) dragRotated = true;
+        const t = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        cubeScenes.forEach((s) => (s.style.transform = t));
+    });
+    document.addEventListener("mouseup", () => {
+        dragging3d = false;
+    });
+
+    // ---- init ----
+    buildPresets();
+    [dom.pageGrid, dom.shardShape, dom.bankX, dom.bankY].forEach((i) =>
+        i.addEventListener("input", render)
+    );
+    [dom.shardingFamily, dom.distribution, dom.legacyLayout, dom.orientation, dom.cube3d].forEach((i) =>
+        i.addEventListener("change", render)
+    );
+    render();
+})();
+</script>
+</body>
+</html>

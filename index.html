@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Dev shell: references external files. Run `node build.js` to produce the
+     single-file page_mapping_viz.html for sharing. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tt-metal buffer page-mapping visualizer</title>
+    <!--__STYLE__--><link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <header>
+        <h1>tt-metal buffer page-mapping visualizer</h1>
+        <p>
+            JS model of <code>buffer.hpp</code>'s allocation behavior, as two compartments:
+            <code>pages → shards</code> (page grid + shard shape) then <code>shards → banks</code>
+            (bank grid + distribution). Named layouts are presets. All values are in <code>pages</code>.
+        </p>
+    </header>
+    <div class="layout">
+        <div id="controls">
+            <div class="field">
+                <label>Presets</label>
+                <div class="preset-btns" id="presets"></div>
+            </div>
+
+            <div class="grp">Sharding model</div>
+            <div class="field">
+                <label>ND vs legacy</label>
+                <select id="shardingFamily">
+                    <option value="nd">ND (BufferDistributionSpec)</option>
+                    <option value="legacy">legacy (classic)</option>
+                    <option value="interleaved">interleaved (not sharded)</option>
+                </select>
+            </div>
+
+            <div class="grp">① pages → shards</div>
+            <div class="field">
+                <label>Page grid (pages) <span class="badge" id="pageCount"></span></label>
+                <input type="text" id="pageGrid" value="4,4" />
+                <div class="hint">how the 1D page list is folded into N-D (row-major). Volume = # pages.</div>
+            </div>
+            <div class="field" id="shardShapeField">
+                <label>Shard shape (pages)</label>
+                <input type="text" id="shardShape" value="2,2" />
+                <div class="hint">same or lower rank than the page grid</div>
+            </div>
+
+            <div class="grp">② shards → banks</div>
+            <div class="row2">
+                <div class="field"><label>Bank grid X</label><input type="number" min="1" step="1" id="bankX" value="2" /></div>
+                <div class="field"><label>Bank grid Y</label><input type="number" min="1" step="1" id="bankY" value="2" /></div>
+            </div>
+            <div class="field" id="ndDistField">
+                <label>ND distribution</label>
+                <select id="distribution">
+                    <option value="round_robin">round-robin (1D, stacks)</option>
+                    <option value="grid_2d">grid (2D, shard grid → bank grid)</option>
+                </select>
+            </div>
+            <div class="field" id="legacyLayoutField" style="display: none">
+                <label>Legacy layout</label>
+                <select id="legacyLayout">
+                    <option value="block">block (2D sub-blocks)</option>
+                    <option value="height">height (contiguous chunks)</option>
+                </select>
+                <div class="hint">classic core_to_host_pages; height chunks the flat page stream</div>
+            </div>
+            <div class="field">
+                <label>Orientation</label>
+                <select id="orientation">
+                    <option value="row_major">row_major</option>
+                    <option value="col_major">col_major</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="results">
+            <div id="error"></div>
+            <div class="summary" id="summary"></div>
+            <div class="draghint">Click a page cell, or a shard / bank header, to toggle its highlight — selected pages light up everywhere and the rest grey out.</div>
+            <div id="selbar"></div>
+
+            <h2 class="section">① pages → shards</h2>
+            <div class="legend" id="shardLegend"></div>
+            <div class="shards" id="shardsView"></div>
+
+            <h2 class="section">② shards → banks (device pages, shards stacked per bank)</h2>
+            <div class="banks" id="banksView"></div>
+
+            <h2 class="section">composition · page grid → bank</h2>
+            <div class="legend" id="pageLegend"></div>
+            <label class="toggle"><input type="checkbox" id="cube3d" /> 3D cube <span class="exp">experimental</span> — render rank-3 page grid &amp; shards as rotatable cubes of layers</label>
+            <div class="cubenote" id="cubeNote"></div>
+            <div id="pageStrip"></div>
+        </div>
+    </div>
+
+    <!--__PAGE_MAPPING_JS__--><script src="page_mapping.js"></script>
+    <!--__APP_JS__--><script src="app.js"></script>
+</body>
+</html>
