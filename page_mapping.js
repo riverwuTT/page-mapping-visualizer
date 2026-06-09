@@ -313,66 +313,15 @@
         return { retVec, retShardShape };
     }
 
-    // Full legacy pipeline: pages -> shards (core_to_host_pages, re-laid into each
-    // shard's padded 2D grid by generate_buffer_page_mapping) -> banks (exactly one
-    // shard per bank, shard i -> bank i in row/col-major order).
-    function computeLegacy(cfg) {
-        const layout = cfg.legacyLayout || "block";
-        const tensor2d = cfg.pageGrid;
-        const shardInPages = cfg.shardShape;
-        if (tensor2d.length !== 2 || shardInPages.length !== 2) {
-            throw new Error("legacy sharding needs a rank-2 page grid and shard shape");
-        }
-        const [H, W] = tensor2d;
-        const [sh, sw] = shardInPages;
-        if (sh <= 0 || sw <= 0) throw new Error("shard dims must be > 0");
-        const shardPages = sh * sw;
-
-        let numShards;
-        let shardGrid;
-        if (layout === "height") {
-            numShards = Math.max(divUp(H * W, shardPages), 1);
-            shardGrid = [numShards, 1];
-        } else {
-            const rows = Math.max(divUp(H, sh), 1);
-            const cols = Math.max(divUp(W, sw), 1);
-            numShards = rows * cols;
-            shardGrid = [rows, cols];
-        }
-
-        const rowMajor = (cfg.orientation || "row_major") !== "col_major";
-        const numBanks = cfg.bankGrid.x * cfg.bankGrid.y;
-        if (numBanks < numShards) {
-            throw new Error(
-                `legacy ${layout} needs ${numShards} banks (one shard per bank) but bank grid has ${numBanks}`
-            );
-        }
-
-        const { retVec, retShardShape } = coreToHostPages(layout, numShards, shardInPages, tensor2d);
-
-        // generate_buffer_page_mapping: re-lay each shard into its padded [sh, sw] grid.
-        const shards = [];
-        const cols = shardGrid[shardGrid.length - 1];
-        for (let c = 0; c < numShards; c++) {
-            const padded = new Array(shardPages).fill(PADDING);
-            let valid = 0;
-            for (let sx = 0; sx < sh; sx++) {
-                for (let sy = 0; sy < sw; sy++) {
-                    if (sx < retShardShape[c][0] && sy < retShardShape[c][1]) {
-                        padded[sx * sw + sy] = retVec[c][valid++];
-                    }
-                }
-            }
-            const gridCoord = layout === "height" ? [c, 0] : [Math.floor(c / cols), c % cols];
-            shards.push({ id: c, gridCoord, shape: [sh, sw], pages: padded });
-        }
-
-        // one shard per bank, sequential (shard i -> bank i)
+    // Assign exactly one shard per bank (shard i -> bank i, row/col-major) and lay
+    // each bank's shard into its device pages. Shared by continuous & grid layouts.
+    function oneShardPerBank(shards, bankGrid, rowMajor) {
+        const numBanks = bankGrid.x * bankGrid.y;
         const banks = [];
         for (let b = 0; b < numBanks; b++) {
-            banks.push({ bankId: b, gridCoord: bankIdToCoord(b, cfg.bankGrid, rowMajor), shardIds: [] });
+            banks.push({ bankId: b, gridCoord: bankIdToCoord(b, bankGrid, rowMajor), shardIds: [] });
         }
-        for (let c = 0; c < numShards; c++) banks[c].shardIds.push(c);
+        for (let c = 0; c < shards.length; c++) banks[c].shardIds.push(c);
 
         const pageLookup = [];
         for (const bank of banks) {
@@ -390,8 +339,70 @@
                 }
             }
         }
+        return { banks, pageLookup };
+    }
 
-        return { shards, shardGrid, numShards, shardVolume: shardPages, banks, numBanks, pageLookup, layout };
+    // Legacy (classic) sharding: one shard per bank; distinct emplacement from ND.
+    //   - "height" / continuous fill: chops the flat page stream into CONTIGUOUS
+    //     chunks of shard-volume pages. A shard is seen only as its volume, so this
+    //     supports 1-D (or any-rank, even mismatched) page-grid / shard shapes.
+    //   - "block" / grid (a.k.a. width): classic 2-D strided gather; rank-2 only.
+    function computeLegacy(cfg) {
+        const layout = cfg.legacyLayout || "block";
+        const shardShape = cfg.shardShape;
+        const shardVolume = volume(shardShape);
+        if (shardVolume <= 0) throw new Error("shard shape must have non-zero volume");
+
+        let shards;
+        let shardGrid;
+
+        if (layout === "height") {
+            const totalPages = volume(cfg.pageGrid);
+            const numShards = Math.max(divUp(totalPages, shardVolume), 1);
+            shardGrid = [numShards, 1];
+            shards = [];
+            let pageId = 0;
+            for (let i = 0; i < numShards; i++) {
+                const pages = new Array(shardVolume).fill(PADDING);
+                for (let off = 0; off < shardVolume && pageId < totalPages; off++) pages[off] = pageId++;
+                shards.push({ id: i, gridCoord: [i, 0], shape: shardShape.slice(), pages });
+            }
+        } else {
+            if (cfg.pageGrid.length !== 2 || shardShape.length !== 2) {
+                throw new Error("grid sharding needs a rank-2 page grid and shard shape");
+            }
+            const tensor2d = cfg.pageGrid;
+            const [H, W] = tensor2d;
+            const [sh, sw] = shardShape;
+            const rows = Math.max(divUp(H, sh), 1);
+            const gridCols = Math.max(divUp(W, sw), 1);
+            const numShards = rows * gridCols;
+            shardGrid = [rows, gridCols];
+            const { retVec, retShardShape } = coreToHostPages("block", numShards, shardShape, tensor2d);
+            shards = [];
+            for (let c = 0; c < numShards; c++) {
+                const padded = new Array(shardVolume).fill(PADDING);
+                let valid = 0;
+                for (let sx = 0; sx < sh; sx++) {
+                    for (let sy = 0; sy < sw; sy++) {
+                        if (sx < retShardShape[c][0] && sy < retShardShape[c][1]) {
+                            padded[sx * sw + sy] = retVec[c][valid++];
+                        }
+                    }
+                }
+                shards.push({ id: c, gridCoord: [Math.floor(c / gridCols), c % gridCols], shape: [sh, sw], pages: padded });
+            }
+        }
+
+        const rowMajor = (cfg.orientation || "row_major") !== "col_major";
+        const numBanks = cfg.bankGrid.x * cfg.bankGrid.y;
+        if (numBanks < shards.length) {
+            const name = layout === "height" ? "continuous fill" : "grid sharding";
+            throw new Error(`${name} needs ${shards.length} banks (one shard per bank) but bank grid has ${numBanks}`);
+        }
+
+        const { banks, pageLookup } = oneShardPerBank(shards, cfg.bankGrid, rowMajor);
+        return { shards, shardGrid, numShards: shards.length, shardVolume, banks, numBanks, pageLookup, layout };
     }
 
     // =============================================================================

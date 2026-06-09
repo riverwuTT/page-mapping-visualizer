@@ -13,6 +13,7 @@
     const PRESETS = [
         ["Interleave", { model: "interleave", pageGrid: "20", bankX: 6, bankY: 1 }],
         ["Continuous fill", { model: "continuous", pageGrid: "8,2", shardShape: "2,2", bankX: 4, bankY: 1 }],
+        ["Continuous 1D", { model: "continuous", pageGrid: "16", shardShape: "4", bankX: 4, bankY: 1 }],
         ["Grid sharding", { model: "grid", pageGrid: "4,4", shardShape: "2,2", bankX: 2, bankY: 2 }],
         ["Grid (partial)", { model: "grid", pageGrid: "5,5", shardShape: "2,2", bankX: 3, bankY: 3 }],
         ["ND round-robin", { model: "nd", pageGrid: "4,4", shardShape: "2,2", bankX: 1, bankY: 2, distribution: "round_robin" }],

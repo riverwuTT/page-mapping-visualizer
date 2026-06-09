@@ -249,6 +249,65 @@ function checkCoverage(res, label) {
         threw = /one shard per bank/.test(e.message);
     }
     ok(threw, "legacy with too few banks throws");
+
+    // grid sharding still requires rank-2 shapes
+    threw = false;
+    try {
+        PM.computeMapping({ pageGrid: [16], shardShape: [4], bankGrid: { x: 4, y: 1 }, distribution: "legacy", legacyLayout: "block" });
+    } catch (e) {
+        threw = /rank-2/.test(e.message);
+    }
+    ok(threw, "grid sharding rejects 1D shapes");
+}
+
+// ---- continuous fill (height) supports 1D — a shard is just its volume ------
+{
+    // 1D page grid + 1D shard: contiguous chunks of shard-volume pages.
+    const r = PM.computeMapping({
+        pageGrid: [16],
+        shardShape: [4],
+        bankGrid: { x: 4, y: 1 },
+        distribution: "legacy",
+        legacyLayout: "height",
+    });
+    eq(r.numShards, 4, "1D continuous: 4 shards");
+    eq(r.shards[0].shape, [4], "1D shard keeps its 1D shape");
+    eq(bankPages(r), [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]], "1D continuous contiguous chunks");
+    checkCoverage(r, "continuous 1D");
+
+    // 1D with a partial last shard -> tail padding
+    const rp = PM.computeMapping({
+        pageGrid: [10],
+        shardShape: [4],
+        bankGrid: { x: 3, y: 1 },
+        distribution: "legacy",
+        legacyLayout: "height",
+    });
+    eq(rp.numShards, 3, "1D partial: 3 shards");
+    eq(shardPages(rp), [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, null, null]], "1D partial last shard tail-padded");
+    checkCoverage(rp, "continuous 1D partial");
+
+    // a shard is seen only as its volume: it can even differ in rank from the grid
+    const rmixed = PM.computeMapping({
+        pageGrid: [16],
+        shardShape: [2, 2],
+        bankGrid: { x: 4, y: 1 },
+        distribution: "legacy",
+        legacyLayout: "height",
+    });
+    eq(rmixed.numShards, 4, "volume-only: 16 pages / vol-4 shard = 4 shards");
+    eq(rmixed.shards[0].pages, [0, 1, 2, 3], "volume-only contiguous fill");
+    checkCoverage(rmixed, "continuous volume-only");
+
+    // 2D continuous still matches the prior behavior
+    const r2 = PM.computeMapping({
+        pageGrid: [8, 2],
+        shardShape: [2, 2],
+        bankGrid: { x: 4, y: 1 },
+        distribution: "legacy",
+        legacyLayout: "height",
+    });
+    eq(bankPages(r2), [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]], "2D continuous unchanged");
 }
 
 // ---- compartment functions usable standalone --------------------------------

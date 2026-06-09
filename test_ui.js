@@ -91,6 +91,14 @@ for (const [name, cfg, nShards, nPages, nBanks] of cases) {
     ok(errText() === "", `continuous no error (got "${errText()}")`);
     ok(JSON.stringify(b0()) === JSON.stringify([0, 1, 2, 3]), `continuous bank0 contiguous (got ${b0()})`);
 
+    // continuous fill supports 1D page grid + 1D shard (volume-only)
+    set("pageGrid", "16");
+    set("shardShape", "4");
+    ok(errText() === "", `1D continuous no error (got "${errText()}")`);
+    ok(JSON.stringify(b0()) === JSON.stringify([0, 1, 2, 3]), `1D continuous bank0 contiguous (got ${b0()})`);
+    set("pageGrid", "4,4");
+    set("shardShape", "2,2");
+
     // grid sharding = 2D sub-blocks (bank 0 differs from continuous)
     set("bankX", 2);
     set("bankY", 2);
