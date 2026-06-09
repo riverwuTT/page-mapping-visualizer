@@ -189,10 +189,22 @@ function checkCoverage(res, label) {
     eq(res.shards[0].pages, [0, 1, 4, 5], "first shard pages match the folded layout");
     checkCoverage(res, "rank-mismatch squeeze");
 
+    // shards always display the SUPPLIED shard shape, never the squeezed one
+    const sup = PM.computeMapping({
+        pageGrid: [2, 3, 4],
+        shardShape: [1, 4],
+        bankGrid: { x: 6, y: 1 },
+        distribution: "round_robin",
+    });
+    eq(sup.shards[0].shape, [1, 4], "ND shard keeps supplied shape (not squeezed [4])");
+    eq(sup.shards[0].pages, [0, 1, 2, 3], "...with the same row-major page assignment");
+    checkCoverage(sup, "supplied-shape shards");
+
     // standalone: ranks need not match
     const c1 = PM.pagesToShards([2, 4, 4], [2, 2]);
     eq(c1.shardGrid, [4, 2], "squeezed shardGrid [4,2]");
     eq(c1.shards.length, 8, "8 shards standalone");
+    eq(c1.shards[0].shape, [2, 2], "standalone shard keeps supplied shape");
 
     // page rank < shard rank is still an error
     let threw = false;

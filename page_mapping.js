@@ -122,6 +122,10 @@
                 `page grid rank (${pageGrid.length}) can't be less than shard rank (${shardShape.length})`
             );
         }
+        // Shards are always displayed with the shape the caller supplied. Squeeze is
+        // only an internal reshape (volume- and row-major-preserving), so the page
+        // assignment is identical whether the shard is viewed squeezed or supplied.
+        const suppliedShardShape = shardShape.slice();
         if (pageGrid.length !== shardShape.length) {
             [pageGrid, shardShape] = squeezeShapeRanks(pageGrid, shardShape);
         }
@@ -154,7 +158,7 @@
             if (dim === rank) {
                 const pages = new Array(shardVolume).fill(PADDING);
                 iterateWithin(0, srcOffset, 0, pages);
-                shards.push({ id: shards.length, gridCoord: gridCoord.slice(), shape: shardShape.slice(), pages });
+                shards.push({ id: shards.length, gridCoord: gridCoord.slice(), shape: suppliedShardShape.slice(), pages });
                 return;
             }
             const shardSize = shardShape[dim];

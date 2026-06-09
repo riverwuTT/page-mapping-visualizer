@@ -301,9 +301,10 @@
             stat("Shard volume", res.shardVolume) +
             stat("Banks", res.numBanks) +
             stat("Padding slots", pad);
-        // shard rank < page-grid rank -> shapes were folded (squeeze_shape_ranks)
+        // shard rank < page-grid rank -> page dims are folded internally for the
+        // distribution (squeeze_shape_ranks); shards still display the supplied shape.
         if (res.squeezed) {
-            s += stat("Squeezed", `[${res.inputShardShape}] → page [${res.squeezedPageGrid}] / shard [${res.shardShape}]`);
+            s += stat("Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`);
         }
         dom.summary.innerHTML = s;
     }

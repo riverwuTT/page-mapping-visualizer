@@ -408,6 +408,10 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
                 `page grid rank (${pageGrid.length}) can't be less than shard rank (${shardShape.length})`
             );
         }
+        // Shards are always displayed with the shape the caller supplied. Squeeze is
+        // only an internal reshape (volume- and row-major-preserving), so the page
+        // assignment is identical whether the shard is viewed squeezed or supplied.
+        const suppliedShardShape = shardShape.slice();
         if (pageGrid.length !== shardShape.length) {
             [pageGrid, shardShape] = squeezeShapeRanks(pageGrid, shardShape);
         }
@@ -440,7 +444,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             if (dim === rank) {
                 const pages = new Array(shardVolume).fill(PADDING);
                 iterateWithin(0, srcOffset, 0, pages);
-                shards.push({ id: shards.length, gridCoord: gridCoord.slice(), shape: shardShape.slice(), pages });
+                shards.push({ id: shards.length, gridCoord: gridCoord.slice(), shape: suppliedShardShape.slice(), pages });
                 return;
             }
             const shardSize = shardShape[dim];
@@ -1128,9 +1132,10 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             stat("Shard volume", res.shardVolume) +
             stat("Banks", res.numBanks) +
             stat("Padding slots", pad);
-        // shard rank < page-grid rank -> shapes were folded (squeeze_shape_ranks)
+        // shard rank < page-grid rank -> page dims are folded internally for the
+        // distribution (squeeze_shape_ranks); shards still display the supplied shape.
         if (res.squeezed) {
-            s += stat("Squeezed", `[${res.inputShardShape}] → page [${res.squeezedPageGrid}] / shard [${res.shardShape}]`);
+            s += stat("Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`);
         }
         dom.summary.innerHTML = s;
     }
