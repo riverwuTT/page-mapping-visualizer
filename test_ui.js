@@ -124,6 +124,19 @@ for (const [name, cfg, nShards, nPages, nBanks] of cases) {
     ok(JSON.stringify(b0) === JSON.stringify([0, 6, 12, 18]), `interleaved bank0 = round-robin (got ${b0})`);
 }
 
+// ---- stats table shows pages + slots allocated ------------------------------
+{
+    drive({ pageGrid: "10", shardShape: "4", bankX: 3, bankY: 1, distribution: "legacy", legacyLayout: "height", orientation: "row_major" });
+    const cellText = (label) => {
+        const row = [...document.querySelectorAll("#summary .stats-table tr")].find(
+            (r) => r.querySelector("td.k") && r.querySelector("td.k").textContent === label
+        );
+        return row ? row.querySelector("td.v").textContent : null;
+    };
+    ok(cellText("Number of pages") === "10", `stats table pages (got ${cellText("Number of pages")})`);
+    ok(cellText("Number of slots allocated") === "12", `stats table slots (got ${cellText("Number of slots allocated")})`);
+}
+
 // preset buttons exist and are wired
 ok(document.querySelectorAll("#presets button").length >= 5, "preset buttons rendered");
 document.querySelectorAll("#presets button")[0].click(); // Interleave

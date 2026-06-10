@@ -443,6 +443,19 @@
         return { shards, shardGrid: [numPages], numShards: numPages, shardVolume: 1, banks, numBanks, pageLookup };
     }
 
+    // Allocation footprint. Banks allocate in lock-step, so every core in the grid
+    // reserves the maximum any single core needs (max shard/stack volume), giving
+    //   slots allocated = maxSlotsPerCore * core-grid volume (numBanks).
+    function addAllocStats(result) {
+        let maxSlotsPerCore = 0;
+        for (const b of result.banks) {
+            if (b.devicePages.length > maxSlotsPerCore) maxSlotsPerCore = b.devicePages.length;
+        }
+        result.maxSlotsPerCore = maxSlotsPerCore;
+        result.slotsAllocated = maxSlotsPerCore * result.numBanks;
+        return result;
+    }
+
     // =============================================================================
     // PUBLIC ENTRY:  pages -> shards -> banks
     // =============================================================================
@@ -456,7 +469,7 @@
 
         if (distribution === "interleaved") {
             const I = computeInterleaved({ ...cfg, pageGrid, orientation });
-            return {
+            return addAllocStats({
                 pageGrid,
                 shardShape: [1],
                 inputShardShape: [1],
@@ -473,12 +486,12 @@
                 banks: I.banks,
                 numBanks: I.numBanks,
                 pageLookup: I.pageLookup,
-            };
+            });
         }
 
         if (distribution === "legacy") {
             const L = computeLegacy({ ...cfg, pageGrid, shardShape, orientation });
-            return {
+            return addAllocStats({
                 pageGrid,
                 shardShape,
                 inputShardShape: shardShape,
@@ -496,7 +509,7 @@
                 banks: L.banks,
                 numBanks: L.numBanks,
                 pageLookup: L.pageLookup,
-            };
+            });
         }
 
         const c1 = pagesToShards(pageGrid, shardShape);
@@ -504,7 +517,7 @@
 
         const numPages = volume(pageGrid);
         const squeezed = c1.pageGrid.length !== pageGrid.length;
-        return {
+        return addAllocStats({
             pageGrid, // original, as entered — drives the composition view layout
             shardShape: c1.shardShape, // effective (squeezed) shard shape; matches `shards`
             inputShardShape: shardShape, // as entered
@@ -521,7 +534,7 @@
             banks: c2.banks,
             numBanks: c2.numBanks,
             pageLookup: c2.pageLookup,
-        };
+        });
     }
 
     return {

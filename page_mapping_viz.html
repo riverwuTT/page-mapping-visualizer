@@ -89,15 +89,16 @@ header code { color: var(--accent); }
 }
 #error:empty { display: none; }
 
-.summary {
-    display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px;
-}
-.stat {
+.summary { margin-bottom: 18px; }
+.stats-table {
+    border-collapse: collapse; font-size: 13px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 8px 12px; min-width: 92px;
 }
-.stat .k { font-size: 11px; color: var(--muted); }
-.stat .v { font-size: 17px; font-weight: 600; }
+.stats-table td { padding: 6px 16px 6px 12px; border-bottom: 1px solid var(--border); }
+.stats-table tr:last-child td { border-bottom: none; }
+.stats-table td.k { color: var(--muted); }
+.stats-table td.v { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.stats-table tr.hot td.v { color: var(--accent); font-size: 15px; }
 
 h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 10px; }
 
@@ -264,7 +265,6 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
         <div id="results">
             <div id="error"></div>
-            <div class="summary" id="summary"></div>
             <div class="draghint">Click a page cell, or a shard / bank header, to toggle its highlight — selected pages light up everywhere and the rest grey out.</div>
             <div id="selbar"></div>
 
@@ -280,6 +280,9 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
             <h2 class="section">② shards → banks (device pages, shards stacked per bank)</h2>
             <div class="banks" id="banksView"></div>
+
+            <h2 class="section">stats</h2>
+            <div class="summary" id="summary"></div>
         </div>
     </div>
 
@@ -729,6 +732,19 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         return { shards, shardGrid: [numPages], numShards: numPages, shardVolume: 1, banks, numBanks, pageLookup };
     }
 
+    // Allocation footprint. Banks allocate in lock-step, so every core in the grid
+    // reserves the maximum any single core needs (max shard/stack volume), giving
+    //   slots allocated = maxSlotsPerCore * core-grid volume (numBanks).
+    function addAllocStats(result) {
+        let maxSlotsPerCore = 0;
+        for (const b of result.banks) {
+            if (b.devicePages.length > maxSlotsPerCore) maxSlotsPerCore = b.devicePages.length;
+        }
+        result.maxSlotsPerCore = maxSlotsPerCore;
+        result.slotsAllocated = maxSlotsPerCore * result.numBanks;
+        return result;
+    }
+
     // =============================================================================
     // PUBLIC ENTRY:  pages -> shards -> banks
     // =============================================================================
@@ -742,7 +758,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
         if (distribution === "interleaved") {
             const I = computeInterleaved({ ...cfg, pageGrid, orientation });
-            return {
+            return addAllocStats({
                 pageGrid,
                 shardShape: [1],
                 inputShardShape: [1],
@@ -759,12 +775,12 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
                 banks: I.banks,
                 numBanks: I.numBanks,
                 pageLookup: I.pageLookup,
-            };
+            });
         }
 
         if (distribution === "legacy") {
             const L = computeLegacy({ ...cfg, pageGrid, shardShape, orientation });
-            return {
+            return addAllocStats({
                 pageGrid,
                 shardShape,
                 inputShardShape: shardShape,
@@ -782,7 +798,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
                 banks: L.banks,
                 numBanks: L.numBanks,
                 pageLookup: L.pageLookup,
-            };
+            });
         }
 
         const c1 = pagesToShards(pageGrid, shardShape);
@@ -790,7 +806,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
         const numPages = volume(pageGrid);
         const squeezed = c1.pageGrid.length !== pageGrid.length;
-        return {
+        return addAllocStats({
             pageGrid, // original, as entered — drives the composition view layout
             shardShape: c1.shardShape, // effective (squeezed) shard shape; matches `shards`
             inputShardShape: shardShape, // as entered
@@ -807,7 +823,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             banks: c2.banks,
             numBanks: c2.numBanks,
             pageLookup: c2.pageLookup,
-        };
+        });
     }
 
     return {
@@ -1114,30 +1130,37 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         applySelection(); // selection was reset; clears any stale highlight/toolbar
     }
 
-    const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     function renderSummary(res) {
+        // [label, value, isHeadlineFigure?]
+        const rows = [
+            ["Number of pages", res.numPages, true],
+            ["Number of slots allocated", res.slotsAllocated, true],
+            ["Padding slots", res.slotsAllocated - res.numPages],
+        ];
         if (res.distribution === "interleaved") {
-            dom.summary.innerHTML =
-                stat("Pages", res.numPages) +
-                stat("Banks", res.numBanks) +
-                stat("Pages/bank (max)", Math.ceil(res.numPages / res.numBanks)) +
-                stat("Layout", "interleaved");
-            return;
+            rows.push(["Banks (cores)", res.numBanks]);
+            rows.push(["Layout", "interleaved"]);
+        } else {
+            rows.push(["Shards", res.numShards]);
+            rows.push(["Shard volume", res.shardVolume]);
+            rows.push(["Banks (cores)", res.numBanks]);
+            rows.push(["Max slots / core", res.maxSlotsPerCore]);
+            rows.push(["Shard grid", res.shardGrid.join(" × ")]);
+            // shard rank < page-grid rank -> page dims folded internally for the
+            // distribution (squeeze); shards still display the supplied shape.
+            if (res.squeezed) {
+                rows.push(["Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`]);
+            }
         }
-        const pad = res.banks.reduce((a, b) => a + b.devicePages.filter((d) => d.pageId == null).length, 0);
-        let s =
-            stat("Pages", res.numPages) +
-            stat("Shard grid", res.shardGrid.join(" × ")) +
-            stat("Shards", res.numShards) +
-            stat("Shard volume", res.shardVolume) +
-            stat("Banks", res.numBanks) +
-            stat("Padding slots", pad);
-        // shard rank < page-grid rank -> page dims are folded internally for the
-        // distribution (squeeze_shape_ranks); shards still display the supplied shape.
-        if (res.squeezed) {
-            s += stat("Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`);
-        }
-        dom.summary.innerHTML = s;
+        dom.summary.innerHTML =
+            '<table class="stats-table"><tbody>' +
+            rows
+                .map(
+                    ([k, v, hot]) =>
+                        `<tr class="${hot ? "hot" : ""}"><td class="k">${k}</td><td class="v">${v}</td></tr>`
+                )
+                .join("") +
+            "</tbody></table>";
     }
 
     function renderShards(res) {

@@ -283,30 +283,37 @@
         applySelection(); // selection was reset; clears any stale highlight/toolbar
     }
 
-    const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     function renderSummary(res) {
+        // [label, value, isHeadlineFigure?]
+        const rows = [
+            ["Number of pages", res.numPages, true],
+            ["Number of slots allocated", res.slotsAllocated, true],
+            ["Padding slots", res.slotsAllocated - res.numPages],
+        ];
         if (res.distribution === "interleaved") {
-            dom.summary.innerHTML =
-                stat("Pages", res.numPages) +
-                stat("Banks", res.numBanks) +
-                stat("Pages/bank (max)", Math.ceil(res.numPages / res.numBanks)) +
-                stat("Layout", "interleaved");
-            return;
+            rows.push(["Banks (cores)", res.numBanks]);
+            rows.push(["Layout", "interleaved"]);
+        } else {
+            rows.push(["Shards", res.numShards]);
+            rows.push(["Shard volume", res.shardVolume]);
+            rows.push(["Banks (cores)", res.numBanks]);
+            rows.push(["Max slots / core", res.maxSlotsPerCore]);
+            rows.push(["Shard grid", res.shardGrid.join(" × ")]);
+            // shard rank < page-grid rank -> page dims folded internally for the
+            // distribution (squeeze); shards still display the supplied shape.
+            if (res.squeezed) {
+                rows.push(["Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`]);
+            }
         }
-        const pad = res.banks.reduce((a, b) => a + b.devicePages.filter((d) => d.pageId == null).length, 0);
-        let s =
-            stat("Pages", res.numPages) +
-            stat("Shard grid", res.shardGrid.join(" × ")) +
-            stat("Shards", res.numShards) +
-            stat("Shard volume", res.shardVolume) +
-            stat("Banks", res.numBanks) +
-            stat("Padding slots", pad);
-        // shard rank < page-grid rank -> page dims are folded internally for the
-        // distribution (squeeze_shape_ranks); shards still display the supplied shape.
-        if (res.squeezed) {
-            s += stat("Folded", `shard [${res.inputShardShape}] over page [${res.squeezedPageGrid}]`);
-        }
-        dom.summary.innerHTML = s;
+        dom.summary.innerHTML =
+            '<table class="stats-table"><tbody>' +
+            rows
+                .map(
+                    ([k, v, hot]) =>
+                        `<tr class="${hot ? "hot" : ""}"><td class="k">${k}</td><td class="v">${v}</td></tr>`
+                )
+                .join("") +
+            "</tbody></table>";
     }
 
     function renderShards(res) {

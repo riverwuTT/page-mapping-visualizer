@@ -79,15 +79,16 @@ header code { color: var(--accent); }
 }
 #error:empty { display: none; }
 
-.summary {
-    display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px;
-}
-.stat {
+.summary { margin-bottom: 18px; }
+.stats-table {
+    border-collapse: collapse; font-size: 13px;
     background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 8px 12px; min-width: 92px;
 }
-.stat .k { font-size: 11px; color: var(--muted); }
-.stat .v { font-size: 17px; font-weight: 600; }
+.stats-table td { padding: 6px 16px 6px 12px; border-bottom: 1px solid var(--border); }
+.stats-table tr:last-child td { border-bottom: none; }
+.stats-table td.k { color: var(--muted); }
+.stats-table td.v { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.stats-table tr.hot td.v { color: var(--accent); font-size: 15px; }
 
 h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 10px; }
 

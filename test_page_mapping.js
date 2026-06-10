@@ -322,6 +322,31 @@ function checkCoverage(res, label) {
     eq(bankPages(r2), [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]], "2D continuous unchanged");
 }
 
+// ---- slots allocated = max slots per core * core-grid volume ----------------
+{
+    // grid, one shard per core, no padding: 4*4 = 16 = numPages
+    const g = PM.computeMapping({ pageGrid: [4, 4], shardShape: [2, 2], bankGrid: { x: 2, y: 2 }, distribution: "grid_2d" });
+    eq(g.slotsAllocated, 16, "grid slots = shardVolume * cores");
+    eq(g.maxSlotsPerCore, 4, "grid max slots/core");
+
+    // continuous 1D partial: 3 cores * 4 = 12 (2 padding slots over 10 pages)
+    const c = PM.computeMapping({ pageGrid: [10], shardShape: [4], bankGrid: { x: 3, y: 1 }, distribution: "legacy", legacyLayout: "height" });
+    eq(c.slotsAllocated, 12, "continuous slots include padding");
+
+    // ND stacking: 4 shards over 2 cores -> 2 shards/core * vol 4 = 8/core * 2 = 16
+    const nd = PM.computeMapping({ pageGrid: [4, 4], shardShape: [2, 2], bankGrid: { x: 1, y: 2 }, distribution: "round_robin" });
+    eq(nd.maxSlotsPerCore, 8, "ND stacked max slots/core");
+    eq(nd.slotsAllocated, 16, "ND stacked slots = maxPerCore * cores");
+
+    // interleave: ceil(20/6)=4 per bank * 6 = 24
+    const il = PM.computeMapping({ pageGrid: [20], shardShape: [1], bankGrid: { x: 6, y: 1 }, distribution: "interleaved" });
+    eq(il.slotsAllocated, 24, "interleave slots = ceil(pages/banks) * banks");
+
+    // empty cores still allocate (lock-step over the whole core grid)
+    const e = PM.computeMapping({ pageGrid: [4, 4], shardShape: [2, 2], bankGrid: { x: 3, y: 3 }, distribution: "grid_2d" });
+    eq(e.slotsAllocated, 36, "empty cores count toward the core-grid volume (4 * 9)");
+}
+
 // ---- compartment functions usable standalone --------------------------------
 {
     const c1 = PM.pagesToShards([4, 4], [2, 2]);
