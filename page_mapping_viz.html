@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Dev shell: references external files. Run `node build.js` to produce the
-     single-file page_mapping_viz.html for sharing. -->
+<!-- Dev shell for the BUFFER visualizer: references external files. Run
+     `node build.js` to produce the single-file page_mapping_viz.html. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
@@ -201,6 +201,67 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 [data-toggle].active { background: var(--accent); color: #0c0f14; }
 [data-toggle].active .core { color: #0c0f14; }
 .shard-hd .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+
+/* ---- tensor element grid (element → page → core) ---- */
+/* Each cell is one tensor element, colored by destination core. Page boundaries
+   are drawn as thick gridlines via the top/left/bot/right edge classes. */
+.elemgrid {
+    display: grid; width: max-content; gap: 0;
+    background: var(--border);
+    border: 1px solid var(--border);
+}
+.ecell {
+    box-sizing: border-box;
+    border-top: 1px solid #11161d; border-left: 1px solid #11161d;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; color: #0c0f14; cursor: pointer; user-select: none;
+}
+/* thick lines on page boundaries */
+.ecell.top { border-top: 2px solid var(--text); }
+.ecell.left { border-left: 2px solid var(--text); }
+.ecell.bot { border-bottom: 2px solid var(--text); }
+.ecell.right { border-right: 2px solid var(--text); }
+.ecell.pad {
+    background: repeating-linear-gradient(45deg, var(--pad), var(--pad) 4px, #2f3744 4px, #2f3744 8px);
+    cursor: default;
+}
+#results.selecting .ecell { filter: grayscale(1); opacity: .18; transition: opacity .08s; }
+#results.selecting .ecell.sel { filter: none; opacity: 1; box-shadow: inset 0 0 0 2px #fff; }
+
+#warn { color: #e3b341; font-size: 12.5px; margin-bottom: 10px; }
+#warn:empty { display: none; }
+
+/* ---- page-coordinate grid: one cell per page, in the element grid's shape,
+   labeled with the element coordinate range the page covers (used when the
+   element grid is too large to draw element-by-element) ---- */
+.pcell {
+    box-sizing: border-box; height: 34px; border-radius: 4px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-size: 9px; line-height: 1.18; color: #0c0f14; cursor: pointer; user-select: none;
+    font-variant-numeric: tabular-nums; padding: 2px; overflow: hidden; white-space: nowrap;
+}
+.pcell .to { opacity: .72; }
+.pcell.pad {
+    background: repeating-linear-gradient(45deg, var(--pad), var(--pad) 4px, #2f3744 4px, #2f3744 8px);
+    color: var(--muted); cursor: default;
+}
+#results.selecting .pcell { filter: grayscale(1); opacity: .18; transition: opacity .08s; }
+#results.selecting .pcell.sel { filter: none; opacity: 1; box-shadow: inset 0 0 0 2px #fff; }
+
+/* color-mode selector at the top of the tensor results */
+.viewbar { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+.viewbar .vlabel { font-size: 12px; color: var(--muted); }
+.viewbar select {
+    padding: 5px 8px; background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font: inherit;
+}
+.viewbar select:focus { outline: none; border-color: var(--accent); }
+
+/* top nav shown on every page of the multi-page site */
+.topnav { display: flex; gap: 14px; align-items: center; margin-top: 8px; font-size: 12.5px; }
+.topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
+.topnav a:hover { color: var(--text); border-color: var(--border); }
+.topnav a.active { color: var(--accent); border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -211,6 +272,11 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             <code>pages → shards</code> (page grid + shard shape) then <code>shards → banks</code>
             (bank grid + distribution). Named layouts are presets. All values are in <code>pages</code>.
         </p>
+        <nav class="topnav">
+            <a href="index.html">Overview</a>
+            <a href="buffer.html" class="active">Buffer page-mapping</a>
+            <a href="tensor.html">Tensor sharding</a>
+        </nav>
     </header>
     <div class="layout">
         <div id="controls">

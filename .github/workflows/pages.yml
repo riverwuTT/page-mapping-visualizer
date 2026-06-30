@@ -35,7 +35,9 @@ jobs:
       - name: Assemble the Pages site
         run: |
           mkdir -p _site
-          cp page_mapping_viz.html _site/index.html
+          cp index.html _site/index.html
+          cp page_mapping_viz.html _site/buffer.html
+          cp tensor_mapping_viz.html _site/tensor.html
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -1,98 +1,94 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Dev shell: references external files. Run `node build.js` to produce the
-     single-file page_mapping_viz.html for sharing. -->
+<!-- Landing / overview page for the visualizer site. Self-contained (inline CSS)
+     so it needs no assets. Links to the two single-file visualizers. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>tt-metal buffer page-mapping visualizer</title>
-    <!--__STYLE__--><link rel="stylesheet" href="style.css" />
+    <title>tt-metal sharding visualizers</title>
+    <style>
+        :root {
+            --bg: #0f1419; --panel: #161b22; --panel2: #1c2330; --border: #2a3340;
+            --text: #d7dee8; --muted: #8b97a7; --accent: #4ea1ff; color-scheme: dark;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; background: var(--bg); color: var(--text);
+            font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
+        h1 { font-size: 26px; margin: 0 0 6px; }
+        .sub { color: var(--muted); margin: 0 0 36px; }
+        code { color: var(--accent); background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+        .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+        @media (max-width: 680px) { .cards { grid-template-columns: 1fr; } }
+        .card {
+            display: block; text-decoration: none; color: inherit;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px;
+            transition: border-color .12s, transform .12s;
+        }
+        .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+        .card h2 { margin: 0 0 8px; font-size: 18px; color: var(--accent); }
+        .card p { margin: 0 0 12px; color: var(--text); font-size: 13.5px; }
+        .card .flow { color: var(--muted); font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .chip { display: inline-block; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 2px 9px; margin: 3px 4px 0 0; }
+        .note { margin-top: 36px; color: var(--muted); font-size: 13px; }
+        .note h3 { color: var(--text); font-size: 14px; margin: 0 0 6px; }
+        a.src { color: var(--accent); text-decoration: none; }
+        a.src:hover { text-decoration: underline; }
+    </style>
 </head>
 <body>
-    <header>
-        <h1>tt-metal buffer page-mapping visualizer</h1>
-        <p>
-            JS model of <code>buffer.hpp</code>'s allocation behavior, as two compartments:
-            <code>pages → shards</code> (page grid + shard shape) then <code>shards → banks</code>
-            (bank grid + distribution). Named layouts are presets. All values are in <code>pages</code>.
+    <div class="wrap">
+        <h1>tt-metal sharding visualizers</h1>
+        <p class="sub">
+            Interactive JavaScript ports of tt-metal's data-layout model — how a tensor's elements
+            end up scattered across device cores. Two layers, two pages:
         </p>
-    </header>
-    <div class="layout">
-        <div id="controls">
-            <div class="field">
-                <label>Presets</label>
-                <div class="preset-btns" id="presets"></div>
-            </div>
 
-            <div class="grp">Sharding model</div>
-            <div class="field">
-                <label>Model</label>
-                <select id="shardingModel">
-                    <option value="interleave">Interleave</option>
-                    <option value="continuous">Continuous fill (height)</option>
-                    <option value="grid" selected>Grid sharding (width / block)</option>
-                    <option value="nd">ND sharding</option>
-                </select>
-            </div>
+        <div class="cards">
+            <a class="card" href="tensor.html">
+                <h2>Tensor sharding →</h2>
+                <p>
+                    The full story: a logical N-D tensor shape, a <code>layout</code> (row-major or
+                    32×32 tile), and a <code>sharding</code> scheme map every <em>element</em> to a page,
+                    then to a core. Ported from <code>tensor_spec.hpp</code>.
+                </p>
+                <div class="flow">elements → pages → cores</div>
+                <div style="margin-top:10px">
+                    <span class="chip">row major</span><span class="chip">tile 32×32</span>
+                    <span class="chip">interleave</span><span class="chip">height</span>
+                    <span class="chip">width</span><span class="chip">block</span><span class="chip">ND</span>
+                </div>
+            </a>
 
-            <div class="grp">① pages → shards</div>
-            <div class="field">
-                <label>Page grid (pages) <span class="badge" id="pageCount"></span></label>
-                <input type="text" id="pageGrid" value="4,4" />
-                <div class="hint">how the 1D page list is folded into N-D (row-major). Volume = # pages.</div>
-            </div>
-            <div class="field" id="shardShapeField">
-                <label>Shard shape (pages)</label>
-                <input type="text" id="shardShape" value="2,2" />
-                <div class="hint">same or lower rank than the page grid</div>
-            </div>
-
-            <div class="grp">② shards → banks</div>
-            <div class="row2">
-                <div class="field"><label>Bank grid X</label><input type="number" min="1" step="1" id="bankX" value="2" /></div>
-                <div class="field"><label>Bank grid Y</label><input type="number" min="1" step="1" id="bankY" value="2" /></div>
-            </div>
-            <div class="field" id="ndDistField" style="display: none">
-                <label>ND distribution</label>
-                <select id="distribution">
-                    <option value="round_robin">round-robin (1D, stacks)</option>
-                    <option value="grid_2d">grid (2D, shard grid → bank grid)</option>
-                </select>
-            </div>
-            <div class="field">
-                <label>Orientation</label>
-                <select id="orientation">
-                    <option value="row_major">row_major</option>
-                    <option value="col_major">col_major</option>
-                </select>
-            </div>
+            <a class="card" href="buffer.html">
+                <h2>Buffer page-mapping →</h2>
+                <p>
+                    The lower layer: given a list of <em>pages</em>, which bank/core does each land in,
+                    and at what shard offset? Ported from <code>buffer.hpp</code> — the page → core step
+                    the tensor model builds on.
+                </p>
+                <div class="flow">pages → shards → banks</div>
+                <div style="margin-top:10px">
+                    <span class="chip">interleave</span><span class="chip">continuous (height)</span>
+                    <span class="chip">grid (width / block)</span><span class="chip">ND</span>
+                </div>
+            </a>
         </div>
 
-        <div id="results">
-            <div id="error"></div>
-            <div class="draghint">Click a page cell, or a shard / bank header, to toggle its highlight — selected pages light up everywhere and the rest grey out.</div>
-            <div id="selbar"></div>
-
-            <h2 class="section">composition · page grid → bank</h2>
-            <div class="legend" id="pageLegend"></div>
-            <label class="toggle"><input type="checkbox" id="cube3d" /> 3D cube <span class="exp">experimental</span> — render rank-3 page grid &amp; shards as rotatable cubes of layers</label>
-            <div class="cubenote" id="cubeNote"></div>
-            <div id="pageStrip"></div>
-
-            <h2 class="section">① pages → shards</h2>
-            <div class="legend" id="shardLegend"></div>
-            <div class="shards" id="shardsView"></div>
-
-            <h2 class="section">② shards → banks (device pages, shards stacked per bank)</h2>
-            <div class="banks" id="banksView"></div>
-
-            <h2 class="section">stats</h2>
-            <div class="summary" id="summary"></div>
+        <div class="note">
+            <h3>How they relate</h3>
+            <p>
+                The buffer model assumes shapes are already <em>in pages</em>. The tensor model adds the
+                missing step in front of it: folding an element shape into pages via the layout
+                (<code>compute_physical_shape</code> → <code>get_page_shape</code>), then handing the
+                resulting page grid + shard shape to the very same page → core logic. Sources:
+                <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/experimental/tensor/spec/tensor_spec.hpp">tensor_spec.hpp</a>,
+                <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/buffer.hpp">buffer.hpp</a>.
+            </p>
         </div>
     </div>
-
-    <!--__PAGE_MAPPING_JS__--><script src="page_mapping.js"></script>
-    <!--__APP_JS__--><script src="app.js"></script>
 </body>
 </html>

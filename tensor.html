@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Dev shell: references external files. Run `node build.js` to produce the
+     single-file tensor_mapping_viz.html for sharing. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tt-metal tensor sharding visualizer</title>
+    <!--__STYLE__--><link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <header>
+        <h1>tt-metal tensor sharding visualizer</h1>
+        <p>
+            JS model of <code>tensor_spec.hpp</code>'s element → page → core mapping. A logical
+            N-D shape folds (by <code>layout</code>) into <code>pages</code>, which scatter across
+            <code>cores</code> (by <code>sharding</code>). The page → core step reuses the
+            <a href="buffer.html" style="color:var(--accent)">buffer model</a>.
+        </p>
+        <nav class="topnav">
+            <a href="index.html">Overview</a>
+            <a href="buffer.html">Buffer page-mapping</a>
+            <a href="tensor.html" class="active">Tensor sharding</a>
+        </nav>
+    </header>
+    <div class="layout">
+        <div id="controls">
+            <div class="field">
+                <label>Presets</label>
+                <div class="preset-btns" id="presets"></div>
+            </div>
+
+            <div class="grp">Tensor</div>
+            <div class="field">
+                <label>Logical shape (elements)</label>
+                <input type="text" id="logicalShape" value="64,64" />
+                <div class="hint">N-D, row-major. e.g. <code>64,96</code> or <code>2,64,64</code></div>
+            </div>
+            <div class="field">
+                <label>Layout</label>
+                <select id="layout">
+                    <option value="TILE" selected>Tile (32×32)</option>
+                    <option value="ROW_MAJOR">Row major</option>
+                </select>
+            </div>
+            <div class="field" id="tileField">
+                <label>Tile (h,w)</label>
+                <input type="text" id="tile" value="32,32" />
+            </div>
+            <div class="field">
+                <label>Data type</label>
+                <select id="dtype">
+                    <option value="BFLOAT16" selected>BFLOAT16</option>
+                    <option value="FLOAT32">FLOAT32</option>
+                    <option value="UINT32">UINT32</option>
+                    <option value="INT32">INT32</option>
+                    <option value="UINT16">UINT16</option>
+                    <option value="UINT8">UINT8</option>
+                    <option value="BFLOAT8_B">BFLOAT8_B</option>
+                    <option value="BFLOAT4_B">BFLOAT4_B</option>
+                </select>
+                <div class="hint">affects row-major recommended shard width</div>
+            </div>
+
+            <div class="grp">Sharding</div>
+            <div class="field">
+                <label>Model</label>
+                <select id="sharding">
+                    <option value="interleave">Interleave</option>
+                    <option value="height">Classic height-sharded</option>
+                    <option value="width">Classic width-sharded</option>
+                    <option value="block" selected>Classic block-sharded</option>
+                    <option value="nd">ND sharded</option>
+                </select>
+            </div>
+            <div id="gridField">
+                <div class="row2">
+                    <div class="field"><label>Core grid X</label><input type="number" min="1" step="1" id="gridX" value="2" /></div>
+                    <div class="field"><label>Core grid Y</label><input type="number" min="1" step="1" id="gridY" value="2" /></div>
+                </div>
+            </div>
+            <div id="bankField" style="display:none">
+                <div class="row2">
+                    <div class="field"><label>Cores X</label><input type="number" min="1" step="1" id="bankX" value="4" /></div>
+                    <div class="field"><label>Cores Y</label><input type="number" min="1" step="1" id="bankY" value="1" /></div>
+                </div>
+            </div>
+            <div class="field" id="ndField" style="display:none">
+                <label>ND shard shape (elements)</label>
+                <input type="text" id="ndShardShape" value="1,32,32" />
+                <div class="hint">N-D, ≤ tensor rank</div>
+                <label style="margin-top:10px">ND distribution</label>
+                <select id="ndStrategy">
+                    <option value="round_robin">round-robin (1D)</option>
+                    <option value="grid_2d">grid (2D)</option>
+                </select>
+                <label style="margin-top:10px">Shard-shape alignment</label>
+                <select id="ndAlignment">
+                    <option value="RECOMMENDED" selected>recommended</option>
+                    <option value="REQUIRED">required</option>
+                    <option value="NONE">none</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Orientation</label>
+                <select id="orientation">
+                    <option value="row_major">row_major</option>
+                    <option value="col_major">col_major</option>
+                </select>
+            </div>
+        </div>
+
+        <div id="results">
+            <div id="error"></div>
+            <div id="warn"></div>
+            <div class="viewbar">
+                <label class="vlabel" for="colorMode">Color cells by</label>
+                <select id="colorMode">
+                    <option value="core">destination core</option>
+                    <option value="page">page</option>
+                    <option value="shard">shard</option>
+                </select>
+            </div>
+            <div class="draghint">Click an element / page / shard / core to toggle its highlight — the same page lights up across every view.</div>
+            <div id="selbar"></div>
+
+            <h2 class="section">element → core (physical 2D grid, colored by core)</h2>
+            <div class="legend" id="elementLegend"></div>
+            <div id="elementView"></div>
+
+            <h2 class="section">page grid → core</h2>
+            <div class="legend" id="pageLegend"></div>
+            <div id="pageStrip"></div>
+
+            <h2 class="section">① pages → shards</h2>
+            <div class="legend" id="shardLegend"></div>
+            <div class="shards" id="shardsView"></div>
+
+            <h2 class="section">② shards → cores (device pages, shards stacked per core)</h2>
+            <div class="banks" id="banksView"></div>
+
+            <h2 class="section">stats</h2>
+            <div class="summary" id="summary"></div>
+        </div>
+    </div>
+
+    <!--__PAGE_MAPPING_JS__--><script src="page_mapping.js"></script>
+    <!--__TENSOR_MAPPING_JS__--><script src="tensor_mapping.js"></script>
+    <!--__TENSOR_APP_JS__--><script src="tensor_app.js"></script>
+</body>
+</html>
