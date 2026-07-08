@@ -97,6 +97,29 @@ eq(T.recommendedShardAlignment(T.pageConfig("ROW_MAJOR"), "FLOAT32"), [16], "rm 
     ok(!r.element.isPadding(7, 7), "D logical corner is real");
 }
 
+// ---- explicit block shard shape is honored (not RECOMMENDED-rounded) --------
+// Regression: grid sharding must use the shard width the caller supplies. The
+// convenience block_sharded auto-split rounds a ROW_MAJOR width up to the 64B
+// recommended alignment (golden D above), but an EXPLICIT shard shape uses
+// REQUIRED so the width stays exact — matching width/height sharding.
+{
+    const r = T.computeTensorMapping({
+        logicalShape: [8, 8], layout: "ROW_MAJOR", sharding: "block",
+        grid: { x: 2, y: 2 }, shardHeight: 4, shardWidth: 4,
+    });
+    eq(r.ndShardShape, [4, 4], "explicit RM block width honored (not rounded to 32)");
+    eq(r.pageShape, [1, 4], "explicit RM block page = one shard-wide row");
+    eq(r.mapping.numShards, 4, "explicit RM block → real 2×2 = 4 shards");
+
+    // TILE still snaps the shard to the tile (mandatory), regardless of explicitness
+    const t = T.computeTensorMapping({
+        logicalShape: [64, 128], layout: "TILE", sharding: "block",
+        grid: { x: 4, y: 2 }, shardHeight: 32, shardWidth: 64,
+    });
+    eq(t.ndShardShape, [32, 64], "explicit TILE block shard width honored");
+    eq(t.mapping.numShards, 4, "TILE block shard 32×64 → 4 shards");
+}
+
 // ---- golden: ND rank-3, tile [2,64,64], shard [1,32,32], round-robin --------
 {
     const r = T.computeTensorMapping({

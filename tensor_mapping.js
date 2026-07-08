@@ -409,6 +409,7 @@
     function blockSharded(baseSpec, grid, orientation, shardHeight, shardWidth) {
         orientation = orientation || "row_major";
         const gs = gridSizeOf(grid);
+        const explicit = shardHeight > 0 || shardWidth > 0;
         const sh = shardHeight > 0 ? shardHeight : divUp(baseSpec.physical[0], orientation === "row_major" ? gs.y : gs.x);
         const sw = shardWidth > 0 ? shardWidth : divUp(baseSpec.physical[1], orientation === "row_major" ? gs.x : gs.y);
         const nd = {
@@ -417,7 +418,12 @@
             orientation,
             strategy: "grid_2d",
         };
-        return sharded(baseSpec, nd, "RECOMMENDED");
+        // Auto-derived split matches TensorSpec::block_sharded (RECOMMENDED — the
+        // shard width is bumped up to the 64B recommended alignment). An explicit
+        // shard shape is instead honored as-is (REQUIRED — only the mandatory layout
+        // alignment applies: the tile size in TILE, nothing in ROW_MAJOR), matching
+        // width/height sharding, so the width the caller typed is not silently grown.
+        return sharded(baseSpec, nd, explicit ? "REQUIRED" : "RECOMMENDED");
     }
 
     // sharded_across_dims / _except: minimal shard (1) on the chosen (or all-but-
