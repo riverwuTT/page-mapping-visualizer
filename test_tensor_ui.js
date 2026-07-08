@@ -194,6 +194,62 @@ click(document.querySelector("#selbar button"));
     drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 });
 }
 
+// ---- classic sharding: width & block take explicit shard dims; height auto --
+{
+    const warnText = () => document.getElementById("warn").textContent;
+    const summaryText = () => document.getElementById("summary").textContent;
+    const shown = (id) => document.getElementById(id).style.display !== "none";
+
+    // height sharding is always the even auto-split — it exposes no shard input
+    drive({ logicalShape: "128,64", layout: "TILE", sharding: "height", gridX: 4, gridY: 1 });
+    ok(!shown("shardDimField"), "height sharding exposes no custom shard dim (always auto-split)");
+    ok(errText() === "" && shardCards() === 4, `height auto → 4 shards over 4 cores (got ${shardCards()})`);
+
+    // width shows only shard width; block shows both; interleave shows neither
+    set("sharding", "width");
+    ok(shown("shardDimField") && shown("shardWField") && !shown("shardHField"), "width shows only shard width");
+    set("sharding", "block");
+    ok(shown("shardHField") && shown("shardWField"), "block shows both shard dims");
+    set("sharding", "interleave");
+    ok(!shown("shardDimField"), "interleave hides shard dims");
+
+    // width sharding, explicit shard width 32: 64×128 tile → 2×4 pages, shard
+    // [64,32]→[2,1] pages → 4 width-shards round-robin over 2 cores (wrap)
+    drive({ logicalShape: "64,128", layout: "TILE", sharding: "width", gridX: 2, gridY: 1 });
+    set("shardW", "32");
+    ok(errText() === "", `explicit width shard no error (got "${errText()}")`);
+    ok(shardCards() === 4, `width shard 32 → 4 shards (got ${shardCards()})`);
+    ok(bankCols() === 2, `width shard over 2 cores (got ${bankCols()})`);
+    ok(/wrap/.test(warnText()), "width shards > cores warns about wrap");
+    ok(/Shard \(elements\)/.test(summaryText()), "summary lists shard shape in elements");
+
+    // block sharding, explicit 2D shard 32×32: 64×128 tile → 2×4 pages, shard
+    // [1,1] pages → 2×4 shard grid → 8 shards, one per core over a 4×2 grid
+    drive({ logicalShape: "64,128", layout: "TILE", sharding: "block", gridX: 4, gridY: 2 });
+    set("shardH", "32");
+    set("shardW", "32");
+    ok(errText() === "", `explicit block shard no error (got "${errText()}")`);
+    ok(shardCards() === 8, `block shard 32×32 → 8 shards (got ${shardCards()})`);
+    ok(bankCols() === 8, `block shard over 4×2 = 8 cores (got ${bankCols()})`);
+    ok(!/wrap/.test(warnText()), "block one-shard-per-core does not warn about wrap");
+
+    // block shard grid that overflows the core grid errors
+    drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 1 });
+    set("shardH", "32");
+    set("shardW", "32");
+    ok(errText().length > 0, "block shard grid larger than core grid surfaces an error");
+
+    // blank shard dims fall back to the even auto-split (convenience helpers)
+    drive({ logicalShape: "64,128", layout: "TILE", sharding: "width", gridX: 4, gridY: 1 });
+    set("shardW", "");
+    ok(errText() === "" && shardCards() === 4, `blank width shard → auto 4 shards (got ${shardCards()})`);
+
+    // restore clean state for the following tests
+    set("shardH", "");
+    set("shardW", "");
+    drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 });
+}
+
 // error path: ND shard shape rank > tensor rank surfaces a message
 drive({ logicalShape: "64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,1,32,32", gridX: 2, gridY: 2 });
 ok(errText().length > 0, "rank-mismatch ND surfaces an error");
@@ -214,14 +270,16 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     };
     setw("logicalShape", "128,64");
     setw("layout", "TILE");
-    setw("sharding", "height");
+    setw("sharding", "width");
     setw("gridX", "4");
     setw("gridY", "1");
+    setw("shardW", "16");
     setw("granularity", "tile");
     setw("colorMode", "shard");
     const h = jw.window.location.hash;
     ok(/shape=128x64/.test(h), `hash carries shape (got "${h}")`);
-    ok(/sharding=height/.test(h) && /grid=4x1/.test(h), "hash carries sharding + grid");
+    ok(/sharding=width/.test(h) && /grid=4x1/.test(h), "hash carries sharding + grid");
+    ok(/sw=16/.test(h), "hash carries explicit shard width");
     ok(/show=tile/.test(h) && /color=shard/.test(h), "hash carries granularity + color mode");
     ok(/tile=32x32/.test(h), "hash carries tile shape in TILE layout");
 
@@ -237,6 +295,12 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     ok(dr.getElementById("granularity").value === "page", "restored granularity");
     ok(dr.getElementById("error").textContent.trim() === "", "restored config renders without error");
     ok(dr.querySelectorAll("#elementView .pcell").length > 0, "restored page view renders page cells");
+
+    // a classic-shard link restores the explicit shard dimension
+    const jc = boot("https://x/tensor.html#shape=64x96,layout=TILE,sharding=width,grid=2x1,sw=32,show=element,color=core");
+    const dc = jc.window.document;
+    ok(dc.getElementById("shardW").value === "32", `restored explicit shard width (got "${dc.getElementById("shardW").value}")`);
+    ok(dc.querySelectorAll("#shardsView .shard-card").length === 3, "restored classic shard renders 3 shards");
 }
 
 console.log(failed === 0 ? "\nTensor UI smoke test: all checks passed" : `\nTensor UI smoke test: ${failed} failed`);

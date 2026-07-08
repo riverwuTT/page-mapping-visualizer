@@ -19,6 +19,7 @@
         ["Tile · height", { logicalShape: "128,64", layout: "TILE", sharding: "height", gridX: 4, gridY: 1 }],
         ["Tile · width", { logicalShape: "64,128", layout: "TILE", sharding: "width", gridX: 4, gridY: 1 }],
         ["Tile · block", { logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 }],
+        ["Tile · width×3 (wrap)", { logicalShape: "64,96", layout: "TILE", sharding: "width", gridX: 2, gridY: 1, shardW: 32 }],
         ["Tile · ND rank-3", { logicalShape: "2,64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,32,32", gridX: 2, gridY: 2, ndStrategy: "round_robin" }],
         ["RM · interleave", { logicalShape: "6,8", layout: "ROW_MAJOR", sharding: "interleave", bankX: 4, bankY: 1 }],
         ["RM · height", { logicalShape: "8,8", layout: "ROW_MAJOR", sharding: "height", gridX: 4, gridY: 1 }],
@@ -37,6 +38,11 @@
         grid: el("gridField"),
         gridX: el("gridX"),
         gridY: el("gridY"),
+        shardDimField: el("shardDimField"),
+        shardHField: el("shardHField"),
+        shardWField: el("shardWField"),
+        shardH: el("shardH"),
+        shardW: el("shardW"),
         orientation: el("orientation"),
         ndField: el("ndField"),
         ndShardShape: el("ndShardShape"),
@@ -190,6 +196,8 @@
         if (!Number.isFinite(n) || n <= 0) throw new Error(`invalid number: "${inp.value}"`);
         return n;
     };
+    // Optional positive int — blank means "unset" (let the model auto-derive).
+    const optIntOf = (inp) => (inp.value.trim() === "" ? undefined : intOf(inp));
 
     // ---- shareable link: mirror the whole config in the URL hash ----
     // Format: #shape=2x2,layout=TILE,sharding=block,grid=2x2,...  — key=value
@@ -208,6 +216,9 @@
         p.push("sharding=" + dom.sharding.value);
         if (dom.sharding.value === "interleave") p.push("banks=" + dom.bankX.value + "x" + dom.bankY.value);
         else p.push("grid=" + dom.gridX.value + "x" + dom.gridY.value);
+        const sm = dom.sharding.value;
+        if (sm === "block" && dom.shardH.value.trim()) p.push("sh=" + dom.shardH.value.trim());
+        if ((sm === "width" || sm === "block") && dom.shardW.value.trim()) p.push("sw=" + dom.shardW.value.trim());
         if (dom.sharding.value === "nd") {
             p.push("ndshape=" + shapeEnc(dom.ndShardShape.value));
             p.push("ndstrat=" + dom.ndStrategy.value);
@@ -246,6 +257,10 @@
         const setV = (inp, v) => {
             if (v != null && v !== "") inp.value = v;
         };
+        // shard dims are auto (blank) unless the link carries them — reset first so
+        // an incoming link fully determines them rather than inheriting stale input.
+        dom.shardH.value = "";
+        dom.shardW.value = "";
         setV(dom.logicalShape, obj.shape && shapeDec(obj.shape));
         setV(dom.layout, obj.layout);
         setV(dom.tile, obj.tile && shapeDec(obj.tile));
@@ -261,6 +276,8 @@
             setV(dom.bankX, x);
             setV(dom.bankY, y);
         }
+        setV(dom.shardH, obj.sh);
+        setV(dom.shardW, obj.sw);
         setV(dom.ndShardShape, obj.ndshape && shapeDec(obj.ndshape));
         setV(dom.ndStrategy, obj.ndstrat);
         setV(dom.ndAlignment, obj.ndalign);
@@ -284,6 +301,8 @@
                 if (vals.bankY) dom.bankY.value = vals.bankY;
                 if (vals.ndShardShape) dom.ndShardShape.value = vals.ndShardShape;
                 if (vals.ndStrategy) dom.ndStrategy.value = vals.ndStrategy;
+                dom.shardH.value = vals.shardH != null ? vals.shardH : "";
+                dom.shardW.value = vals.shardW != null ? vals.shardW : "";
                 render();
             };
             dom.presets.appendChild(b);
@@ -299,6 +318,13 @@
         dom.grid.style.display = isInterleave ? "none" : "";
         dom.ndField.style.display = isND ? "" : "none";
         dom.bankField.style.display = isInterleave ? "" : "none";
+        // classic sharding takes an explicit shard shape — but height sharding is
+        // always the even auto-split, so only width (shard width) and block (both
+        // dims) expose an input.
+        const hasCustomShard = sharding === "width" || sharding === "block";
+        dom.shardDimField.style.display = hasCustomShard ? "" : "none";
+        dom.shardHField.style.display = sharding === "block" ? "" : "none";
+        dom.shardWField.style.display = sharding === "width" || sharding === "block" ? "" : "none";
     }
 
     function render() {
@@ -326,6 +352,10 @@
             } else {
                 cfg.grid = { x: intOf(dom.gridX), y: intOf(dom.gridY) };
             }
+            // Height sharding always auto-splits (shard height = full-tensor-height /
+            // num-cores); only width and block take an explicit shard dimension.
+            if (cfg.sharding === "block") cfg.shardHeight = optIntOf(dom.shardH);
+            if (cfg.sharding === "width" || cfg.sharding === "block") cfg.shardWidth = optIntOf(dom.shardW);
             if (cfg.sharding === "nd") {
                 cfg.ndShardShape = parseShape(dom.ndShardShape.value);
                 cfg.ndStrategy = dom.ndStrategy.value;
@@ -345,7 +375,24 @@
         renderComposition(res);
         renderShards(res);
         renderBanks(res);
+        updateShardHints(res);
         applySelection();
+    }
+
+    // Reflect the effective (post-alignment) shard shape as the placeholder for the
+    // shard-dim inputs, and warn when a classic 1D shard oversubscribes its cores.
+    function updateShardHints(res) {
+        const nd = res.ndShardShape;
+        const sharded = res.distribution !== "interleaved" && nd && nd.length >= 2;
+        dom.shardH.placeholder = sharded ? String(nd[nd.length - 2]) : "auto";
+        dom.shardW.placeholder = sharded ? String(nd[nd.length - 1]) : "auto";
+        // A custom width shard can oversubscribe the cores; height auto-splits, so
+        // it never does.
+        if (dom.sharding.value === "width" && res.mapping.numShards > res.mapping.numBanks && !dom.warn.textContent) {
+            dom.warn.textContent =
+                `${res.mapping.numShards} shards over ${res.mapping.numBanks} core${res.mapping.numBanks === 1 ? "" : "s"} — ` +
+                `shards wrap round-robin (>1 per core). Classic width sharding normally requires shards ≤ cores.`;
+        }
     }
 
     function renderSummary(res) {
@@ -362,6 +409,7 @@
             ["Tensor in pages", `${res.tensor2dInPages[0]} × ${res.tensor2dInPages[1]}  (= ${m.numPages})`, true],
         ];
         if (res.distribution !== "interleaved") {
+            rows.push(["Shard (elements)", res.ndShardShape ? res.ndShardShape.join(" × ") : "—"]);
             rows.push(["Shard (pages)", res.shardShapeInPages ? res.shardShapeInPages.join(" × ") : "—"]);
             rows.push(["Distribution", res.distribution === "grid_2d" ? "grid (2D)" : "round-robin (1D)"]);
             rows.push(["Shards", m.numShards]);
@@ -756,7 +804,7 @@
 
     // ---- init ----
     buildPresets();
-    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape].forEach((i) =>
+    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape, dom.shardH, dom.shardW].forEach((i) =>
         i.addEventListener("input", render)
     );
     [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode, dom.granularity].forEach((i) =>

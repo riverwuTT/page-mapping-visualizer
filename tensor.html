@@ -80,6 +80,13 @@
                     <div class="field"><label>Core grid Y</label><input type="number" min="1" step="1" id="gridY" value="2" /></div>
                 </div>
             </div>
+            <div id="shardDimField">
+                <div class="row2">
+                    <div class="field" id="shardHField"><label>Shard height (elem)</label><input type="number" min="1" step="1" id="shardH" placeholder="auto" /></div>
+                    <div class="field" id="shardWField"><label>Shard width (elem)</label><input type="number" min="1" step="1" id="shardW" placeholder="auto" /></div>
+                </div>
+                <div class="hint">Blank = auto: even split, 1 shard/core. Width sets shard width (full height); block sets both. Height sharding always auto-splits.</div>
+            </div>
             <div id="bankField" style="display:none">
                 <div class="row2">
                     <div class="field"><label>Cores X</label><input type="number" min="1" step="1" id="bankX" value="4" /></div>

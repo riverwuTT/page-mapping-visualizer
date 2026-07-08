@@ -375,12 +375,17 @@
         return makeSpec(baseSpec.logicalShape, layout);
     }
 
-    function heightSharded(baseSpec, grid, orientation) {
+    // Classic HEIGHT / WIDTH / BLOCK sharding. The shard shape mirrors a legacy
+    // ShardSpec (elements): the sharded dim comes from the caller, the other dim
+    // spans the full physical extent. When the caller omits the shard dim, we fall
+    // back to the even "1 shard per core" split that TensorSpec::{height,width,
+    // block}_sharded compute — so a blank field reproduces the convenience helpers.
+    function heightSharded(baseSpec, grid, orientation, shardHeight) {
         orientation = orientation || "row_major";
         const numCores = gridNumCores(grid);
-        const shardHeight = divUp(baseSpec.physical[0], numCores);
+        const sh = shardHeight > 0 ? shardHeight : divUp(baseSpec.physical[0], numCores);
         const nd = {
-            shardShape: [shardHeight, baseSpec.physical[1]],
+            shardShape: [sh, baseSpec.physical[1]],
             grid,
             orientation,
             strategy: "round_robin",
@@ -388,12 +393,12 @@
         return sharded(baseSpec, nd, "REQUIRED");
     }
 
-    function widthSharded(baseSpec, grid, orientation) {
+    function widthSharded(baseSpec, grid, orientation, shardWidth) {
         orientation = orientation || "row_major";
         const numCores = gridNumCores(grid);
-        const shardWidth = divUp(baseSpec.physical[1], numCores);
+        const sw = shardWidth > 0 ? shardWidth : divUp(baseSpec.physical[1], numCores);
         const nd = {
-            shardShape: [baseSpec.physical[0], shardWidth],
+            shardShape: [baseSpec.physical[0], sw],
             grid,
             orientation,
             strategy: "round_robin",
@@ -401,13 +406,13 @@
         return sharded(baseSpec, nd, "REQUIRED");
     }
 
-    function blockSharded(baseSpec, grid, orientation) {
+    function blockSharded(baseSpec, grid, orientation, shardHeight, shardWidth) {
         orientation = orientation || "row_major";
         const gs = gridSizeOf(grid);
-        const shardHeight = divUp(baseSpec.physical[0], orientation === "row_major" ? gs.y : gs.x);
-        const shardWidth = divUp(baseSpec.physical[1], orientation === "row_major" ? gs.x : gs.y);
+        const sh = shardHeight > 0 ? shardHeight : divUp(baseSpec.physical[0], orientation === "row_major" ? gs.y : gs.x);
+        const sw = shardWidth > 0 ? shardWidth : divUp(baseSpec.physical[1], orientation === "row_major" ? gs.x : gs.y);
         const nd = {
-            shardShape: [shardHeight, shardWidth],
+            shardShape: [sh, sw],
             grid,
             orientation,
             strategy: "grid_2d",
@@ -520,6 +525,9 @@
     //   dtype: "BFLOAT16"|...,
     //   sharding: "interleave"|"height"|"width"|"block"|"nd",
     //   grid: { x, y },              // core grid (sharded modes)
+    //   shardHeight,                 // classic height/block shard height (elements);
+    //   shardWidth,                  // classic width/block shard width (elements);
+    //                                // omit/0 → even "1 shard per core" auto-split
     //   orientation: "row_major"|"col_major",
     //   ndShardShape: [..],          // for sharding === "nd"
     //   ndStrategy: "round_robin"|"grid_2d",   // for "nd"
@@ -546,11 +554,12 @@
         if (cfg.sharding === "interleave") {
             spec = baseSpec;
         } else if (cfg.sharding === "height") {
+            // height sharding is always the even auto-split (no custom shard height)
             spec = heightSharded(baseSpec, cfg.grid, orientation);
         } else if (cfg.sharding === "width") {
-            spec = widthSharded(baseSpec, cfg.grid, orientation);
+            spec = widthSharded(baseSpec, cfg.grid, orientation, cfg.shardWidth);
         } else if (cfg.sharding === "block") {
-            spec = blockSharded(baseSpec, cfg.grid, orientation);
+            spec = blockSharded(baseSpec, cfg.grid, orientation, cfg.shardHeight, cfg.shardWidth);
         } else if (cfg.sharding === "nd") {
             const nd = {
                 shardShape: cfg.ndShardShape.slice(),
