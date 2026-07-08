@@ -115,17 +115,24 @@
             <div id="error"></div>
             <div id="warn"></div>
             <div class="viewbar">
-                <label class="vlabel" for="colorMode">Color cells by</label>
+                <label class="vlabel" for="granularity">Show</label>
+                <select id="granularity">
+                    <option value="element" selected>elements</option>
+                    <option value="tile">tiles</option>
+                    <option value="page">pages</option>
+                </select>
+                <span class="varrow">→</span>
+                <label class="vlabel" for="colorMode">mapped to</label>
                 <select id="colorMode">
-                    <option value="core">destination core</option>
-                    <option value="page">page</option>
-                    <option value="shard">shard</option>
+                    <option value="core">cores</option>
+                    <option value="shard">shards</option>
+                    <option value="page">pages</option>
                 </select>
             </div>
-            <div class="draghint">Click an element / page / shard / core to toggle its highlight — the same page lights up across every view.</div>
+            <div class="draghint">Click an element / tile / page / shard / core to toggle its highlight — the same page lights up across every view.</div>
             <div id="selbar"></div>
 
-            <h2 class="section">element → core (physical 2D grid, colored by core)</h2>
+            <h2 class="section" id="granHeading">Elements → Cores</h2>
             <div class="legend" id="elementLegend"></div>
             <div id="elementView"></div>
 

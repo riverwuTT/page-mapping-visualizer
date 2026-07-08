@@ -144,6 +144,56 @@ click(document.querySelector("#selbar button"));
     ok(coreColor !== undefined && shardColor !== undefined, "first element colored in core+shard modes");
 }
 
+// ---- granularity ("Show") selector: element / tile / page ------------------
+{
+    drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 });
+    const heading = () => document.getElementById("granHeading").textContent;
+    const tileCells = () => document.querySelectorAll("#elementView .tcell").length;
+    const pgCells = () => document.querySelectorAll("#elementView .pcell").length;
+
+    ok(document.getElementById("granularity") != null, "granularity selector present");
+
+    set("granularity", "element");
+    ok(elementCells() === 64 * 64, `element granularity renders element grid (got ${elementCells()})`);
+    ok(/^Elements →/.test(heading()), `element heading reads "Elements → ..." (got "${heading()}")`);
+
+    // 64×64 tile layout, 32×32 tiles → 2×2 = 4 tile cells; no per-element cells
+    set("granularity", "tile");
+    ok(tileCells() === 4, `tile granularity → 4 tile cells (got ${tileCells()})`);
+    ok(elementCells() === 0, "tile granularity draws no per-element cells");
+    ok(/^Tiles →/.test(heading()), `tile heading reads "Tiles → ..." (got "${heading()}")`);
+
+    // page granularity → one cell per page in the page grid
+    set("granularity", "page");
+    ok(pgCells() === 4, `page granularity → 4 page cells (got ${pgCells()})`);
+    ok(elementCells() === 0, "page granularity draws no per-element cells");
+
+    // mapped-to drives the heading destination word
+    set("colorMode", "shard");
+    ok(/→ Shards$/.test(heading()), `heading reflects mapped-to (got "${heading()}")`);
+    set("colorMode", "core");
+
+    // clicking a tile cell links to the other views (single-page tile here)
+    set("granularity", "tile");
+    {
+        const t0 = document.querySelector('#elementView .tcell[data-page="0"]');
+        ok(t0 != null, "single-page tile cell carries data-page");
+        click(t0);
+        ok(document.querySelectorAll('.cell[data-page="0"].sel, .tcell[data-page="0"].sel').length >= 2,
+            "tile cell click highlights across views");
+        click(document.querySelector("#selbar button"));
+    }
+
+    // row-major tile view: a 32×32 tile spans many 1×W pages, possibly across
+    // cores → a multi-page tile toggle (no single data-page) still renders
+    drive({ logicalShape: "64,64", layout: "ROW_MAJOR", sharding: "block", gridX: 2, gridY: 2 });
+    ok(tileCells() > 0, `RM tile view renders tile cells (got ${tileCells()})`);
+
+    // restore defaults for the following tests
+    set("granularity", "element");
+    drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 });
+}
+
 // error path: ND shard shape rank > tensor rank surfaces a message
 drive({ logicalShape: "64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,1,32,32", gridX: 2, gridY: 2 });
 ok(errText().length > 0, "rank-mismatch ND surfaces an error");

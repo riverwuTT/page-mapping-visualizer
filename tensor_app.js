@@ -25,6 +25,7 @@
         ["RM · block", { logicalShape: "8,8", layout: "ROW_MAJOR", sharding: "block", gridX: 2, gridY: 2 }],
     ];
 
+    const divUp = (a, b) => Math.floor((a + b - 1) / b);
     const el = (id) => document.getElementById(id);
     const dom = {
         logicalShape: el("logicalShape"),
@@ -45,6 +46,8 @@
         bankX: el("bankX"),
         bankY: el("bankY"),
         colorMode: el("colorMode"),
+        granularity: el("granularity"),
+        granHeading: el("granHeading"),
         presets: el("presets"),
         error: el("error"),
         warn: el("warn"),
@@ -66,11 +69,14 @@
     let selection = new Set();
     let selectedCells = [];
 
-    function registerCell(cell, pageId) {
-        cell.dataset.page = pageId;
+    function linkCell(cell, pageId) {
         let arr = cellsByPage.get(pageId);
         if (!arr) cellsByPage.set(pageId, (arr = []));
         arr.push(cell);
+    }
+    function registerCell(cell, pageId) {
+        cell.dataset.page = pageId;
+        linkCell(cell, pageId);
     }
     function registerToggle(elm, pages) {
         elm.dataset.toggle = "1";
@@ -133,6 +139,21 @@
         if (m === "page") return colorFor(pageId);
         if (m === "shard") return colorFor(lk.shardId);
         return colorFor(lk.bankId);
+    }
+
+    // The "Show" granularity (what one headline cell represents) and the "mapped
+    // to" destination (what its color/grouping encodes) form the transformation
+    // shown in the headline view, e.g. "Elements → Cores".
+    const GRAN_WORD = { element: "Elements", tile: "Tiles", page: "Pages" };
+    const DEST_WORD = { core: "Cores", shard: "Shards", page: "Pages" };
+    const granularity = () => dom.granularity.value;
+    // The destination bucket a page falls into under the active color mode — same
+    // grouping cellColorFor uses. Two units with the same key share a color.
+    function destKeyOf(lk, pageId) {
+        const m = colorMode();
+        if (m === "page") return pageId;
+        if (m === "shard") return lk.shardId;
+        return lk.bankId;
     }
 
     // Legend for the element / page-grid views, matching the active color mode.
@@ -241,7 +262,7 @@
         }
 
         renderSummary(res);
-        renderElementGrid(res);
+        renderGranularityView(res);
         renderComposition(res);
         renderShards(res);
         renderBanks(res);
@@ -276,9 +297,116 @@
             "</tbody></table>";
     }
 
-    // The headline tensor view: the physical 2D element grid. Each element is one
-    // cell, colored by the CORE its page lands on; page boundaries are drawn as
-    // thick gridlines; elements outside the logical shape are hatched padding.
+    // The headline "transformation" view: render one cell per <granularity> unit
+    // (element / tile / page), colored/grouped by the <mapped-to> destination.
+    // The heading reads e.g. "Elements → Cores".
+    function renderGranularityView(res) {
+        const g = granularity();
+        dom.granHeading.textContent = `${GRAN_WORD[g]} → ${DEST_WORD[colorMode()]}`;
+        dom.elementView.innerHTML = "";
+        dom.elementLegend.innerHTML = "";
+        if (g === "page") return renderPageView(res);
+        if (g === "tile") return renderTileView(res);
+        return renderElementGrid(res);
+    }
+
+    // Page granularity: one cell per page, laid out in the page grid, labeled with
+    // the element coordinate range it covers. Reuses the element grid's page-cell
+    // renderer (also the oversized-tensor fallback), colored by the active mode.
+    function renderPageView(res) {
+        dom.elementLegend.innerHTML = colorLegend(res);
+        renderPageCoordGrid(res);
+    }
+
+    // Tile granularity: one cell per tile-shaped block (tile[h]×tile[w] elements),
+    // regardless of layout. In TILE layout a tile coincides with a page; in
+    // ROW_MAJOR it is a coarse block that spans many 1×W pages — possibly across
+    // several destinations, which is flagged with a corner marker (◩).
+    function renderTileView(res) {
+        const e = res.element;
+        const [tileH, tileW] = res.tile;
+        const H = e.H, W = e.W;
+        const tilesH = divUp(H, tileH);
+        const tilesW = divUp(W, tileW);
+        const total = tilesH * tilesW;
+        dom.elementLegend.innerHTML = colorLegend(res);
+
+        const TMAX = 4000;
+        if (total > TMAX) {
+            const note = div("draghint");
+            note.textContent =
+                `Tile grid is ${tilesH} × ${tilesW} = ${total} tiles — too many to draw. ` +
+                `Switch "Show" to pages, or use a smaller shape.`;
+            dom.elementView.appendChild(note);
+            return;
+        }
+
+        const colPx = total > 600 ? 44 : total > 150 ? 62 : 84;
+        const grid = div("cells");
+        grid.style.gridTemplateColumns = `repeat(${tilesW}, ${colPx}px)`;
+        let hasMixed = false;
+        for (let tr = 0; tr < tilesH; tr++) {
+            for (let tc = 0; tc < tilesW; tc++) {
+                const r0 = tr * tileH, c0 = tc * tileW;
+                const r1 = Math.min(r0 + tileH, H) - 1;
+                const c1 = Math.min(c0 + tileW, W) - 1;
+                // pages the tile block overlaps
+                const pr0 = Math.floor(r0 / e.ph), pr1 = Math.floor(r1 / e.ph);
+                const pc0 = Math.floor(c0 / e.pw), pc1 = Math.floor(c1 / e.pw);
+                const present = [];
+                for (let pr = pr0; pr <= pr1; pr++) {
+                    for (let pc = pc0; pc <= pc1; pc++) {
+                        const p = pr * e.pagesW + pc;
+                        const lk = res.mapping.pageLookup[p];
+                        if (lk) present.push({ p, lk });
+                    }
+                }
+                const cell = div("pcell tcell");
+                cell.style.width = colPx + "px";
+                if (!present.length) {
+                    cell.classList.add("pad");
+                    cell.innerHTML =
+                        `<span class="from">tile (${tr}, ${tc})</span><span class="to">padding</span>`;
+                    cell.title = `tile (${tr}, ${tc})  ·  elements (${r0},${c0}) → (${r1},${c1}) — padding`;
+                    grid.appendChild(cell);
+                    continue;
+                }
+                const rep = present[0];
+                cell.style.background = cellColorFor(rep.lk, rep.p);
+                const keys = new Set(present.map((x) => destKeyOf(x.lk, x.p)));
+                const mixed = keys.size > 1;
+                if (mixed) { cell.classList.add("mixed"); hasMixed = true; }
+                cell.innerHTML =
+                    `<span class="from">(${r0}, ${c0})</span>` +
+                    `<span class="to">→ (${r1}, ${c1})</span>`;
+                const pageIds = present.map((x) => x.p);
+                const pageSpan = pageIds.length === 1 ? `page ${pageIds[0]}` :
+                    `pages ${pageIds[0]}–${pageIds[pageIds.length - 1]} (${pageIds.length})`;
+                const bc = res.mapping.banks[rep.lk.bankId].gridCoord;
+                cell.title =
+                    `tile (${tr}, ${tc})  ·  elements (${r0},${c0}) → (${r1},${c1})\n` +
+                    `${pageSpan}\n` +
+                    (mixed
+                        ? `spans multiple ${DEST_WORD[colorMode()].toLowerCase()}`
+                        : `→ core ${rep.lk.bankId} (${bc.x},${bc.y})  ·  shard ${rep.lk.shardId}`);
+                pageIds.forEach((p) => linkCell(cell, p));
+                if (pageIds.length === 1) cell.dataset.page = pageIds[0];
+                else registerToggle(cell, pageIds);
+                grid.appendChild(cell);
+            }
+        }
+        const wrap = div("pagegrid");
+        wrap.appendChild(grid);
+        dom.elementView.appendChild(wrap);
+        if (hasMixed) {
+            dom.elementLegend.innerHTML +=
+                `<span class="sw" style="color:var(--muted)">◩ = tile spans multiple ${DEST_WORD[colorMode()].toLowerCase()}</span>`;
+        }
+    }
+
+    // The physical 2D element grid. Each element is one cell, colored by its page's
+    // destination (mapped-to mode); page boundaries are drawn as thick gridlines;
+    // elements outside the logical shape are hatched padding.
     function renderElementGrid(res) {
         dom.elementView.innerHTML = "";
         const e = res.element;
@@ -288,9 +416,9 @@
             dom.warn.textContent =
                 `Element grid has ${total} elements (> ${MAX}) — too many to draw one cell per element. ` +
                 `Showing one cell per page instead, laid out in the element grid's shape, each labeled with the ` +
-                `element coordinate range [from] → [to] it covers (colored by destination core).`;
+                `element coordinate range [from] → [to] it covers.`;
             renderPageCoordGrid(res);
-            dom.elementLegend.innerHTML = coreLegend(res, "color = destination core");
+            dom.elementLegend.innerHTML = colorLegend(res);
             return;
         }
         const cellPx = total > 2500 ? 11 : total > 900 ? 15 : 22;
@@ -552,7 +680,7 @@
     [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape].forEach((i) =>
         i.addEventListener("input", render)
     );
-    [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode].forEach((i) =>
+    [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode, dom.granularity].forEach((i) =>
         i.addEventListener("change", render)
     );
     render();
