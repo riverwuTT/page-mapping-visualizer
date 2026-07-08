@@ -198,5 +198,46 @@ click(document.querySelector("#selbar button"));
 drive({ logicalShape: "64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,1,32,32", gridX: 2, gridY: 2 });
 ok(errText().length > 0, "rank-mismatch ND surfaces an error");
 
+// ---- shareable link: config <-> URL hash round-trip ------------------------
+// Uses fresh documents booted at a real URL (the shared jsdom above is about:blank,
+// where history.replaceState is a no-op).
+{
+    const boot = (u) => new JSDOM(html, { runScripts: "dangerously", pretendToBeVisual: true, url: u });
+
+    // write: driving the controls mirrors the config into location.hash
+    const jw = boot("https://x/tensor.html");
+    const dw = jw.window.document;
+    const setw = (id, v) => {
+        const e = dw.getElementById(id);
+        e.value = v;
+        e.dispatchEvent(new jw.window.Event(e.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
+    };
+    setw("logicalShape", "128,64");
+    setw("layout", "TILE");
+    setw("sharding", "height");
+    setw("gridX", "4");
+    setw("gridY", "1");
+    setw("granularity", "tile");
+    setw("colorMode", "shard");
+    const h = jw.window.location.hash;
+    ok(/shape=128x64/.test(h), `hash carries shape (got "${h}")`);
+    ok(/sharding=height/.test(h) && /grid=4x1/.test(h), "hash carries sharding + grid");
+    ok(/show=tile/.test(h) && /color=shard/.test(h), "hash carries granularity + color mode");
+    ok(/tile=32x32/.test(h), "hash carries tile shape in TILE layout");
+
+    // read: booting AT a hash restores that configuration and renders it
+    const jr = boot(
+        "https://x/tensor.html#shape=2x64x64,layout=TILE,sharding=nd,grid=2x2," +
+        "ndshape=1x32x32,ndstrat=round_robin,ndalign=RECOMMENDED,show=page,color=core"
+    );
+    const dr = jr.window.document;
+    ok(dr.getElementById("logicalShape").value === "2,64,64", `restored shape (got "${dr.getElementById("logicalShape").value}")`);
+    ok(dr.getElementById("sharding").value === "nd", "restored sharding");
+    ok(dr.getElementById("ndShardShape").value === "1,32,32", "restored nd shard shape");
+    ok(dr.getElementById("granularity").value === "page", "restored granularity");
+    ok(dr.getElementById("error").textContent.trim() === "", "restored config renders without error");
+    ok(dr.querySelectorAll("#elementView .pcell").length > 0, "restored page view renders page cells");
+}
+
 console.log(failed === 0 ? "\nTensor UI smoke test: all checks passed" : `\nTensor UI smoke test: ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

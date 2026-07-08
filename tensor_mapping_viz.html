@@ -1814,6 +1814,84 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         return n;
     };
 
+    // ---- shareable link: mirror the whole config in the URL hash ----
+    // Format: #shape=2x2,layout=TILE,sharding=block,grid=2x2,...  — key=value
+    // pairs joined by commas, so shape-valued fields use 'x' (not ',') internally.
+    const shapeEnc = (s) => s.split(",").map((x) => x.trim()).filter((x) => x.length).join("x");
+    const shapeDec = (s) => s.split("x").map((x) => x.trim()).filter((x) => x.length).join(",");
+
+    // Only the fields that matter for the current mode are emitted, keeping links
+    // short; anything omitted falls back to the control's current value on load.
+    function encodeHash() {
+        const p = [];
+        p.push("shape=" + shapeEnc(dom.logicalShape.value));
+        p.push("layout=" + dom.layout.value);
+        if (dom.layout.value === "TILE") p.push("tile=" + shapeEnc(dom.tile.value));
+        p.push("dtype=" + dom.dtype.value);
+        p.push("sharding=" + dom.sharding.value);
+        if (dom.sharding.value === "interleave") p.push("banks=" + dom.bankX.value + "x" + dom.bankY.value);
+        else p.push("grid=" + dom.gridX.value + "x" + dom.gridY.value);
+        if (dom.sharding.value === "nd") {
+            p.push("ndshape=" + shapeEnc(dom.ndShardShape.value));
+            p.push("ndstrat=" + dom.ndStrategy.value);
+            p.push("ndalign=" + dom.ndAlignment.value);
+        }
+        p.push("orient=" + dom.orientation.value);
+        p.push("show=" + dom.granularity.value);
+        p.push("color=" + dom.colorMode.value);
+        return p.join(",");
+    }
+
+    let lastHash = null;
+    function updateHash() {
+        const h = encodeHash();
+        if (h === lastHash) return;
+        lastHash = h;
+        if (window.history && history.replaceState) {
+            try {
+                history.replaceState(null, "", "#" + h);
+            } catch (e) {
+                /* jsdom / sandboxed frames may reject; the UI still works */
+            }
+        }
+    }
+
+    // Apply an incoming hash onto the controls. Missing keys leave defaults intact;
+    // unknown option values are ignored by the <select> (stays on its default).
+    function applyHash() {
+        const raw = (location.hash || "").replace(/^#/, "");
+        if (!raw) return;
+        const obj = {};
+        for (const kv of raw.split(",")) {
+            const i = kv.indexOf("=");
+            if (i > 0) obj[kv.slice(0, i)] = kv.slice(i + 1);
+        }
+        const setV = (inp, v) => {
+            if (v != null && v !== "") inp.value = v;
+        };
+        setV(dom.logicalShape, obj.shape && shapeDec(obj.shape));
+        setV(dom.layout, obj.layout);
+        setV(dom.tile, obj.tile && shapeDec(obj.tile));
+        setV(dom.dtype, obj.dtype);
+        setV(dom.sharding, obj.sharding);
+        if (obj.grid) {
+            const [x, y] = obj.grid.split("x");
+            setV(dom.gridX, x);
+            setV(dom.gridY, y);
+        }
+        if (obj.banks) {
+            const [x, y] = obj.banks.split("x");
+            setV(dom.bankX, x);
+            setV(dom.bankY, y);
+        }
+        setV(dom.ndShardShape, obj.ndshape && shapeDec(obj.ndshape));
+        setV(dom.ndStrategy, obj.ndstrat);
+        setV(dom.ndAlignment, obj.ndalign);
+        setV(dom.orientation, obj.orient);
+        setV(dom.granularity, obj.show);
+        setV(dom.colorMode, obj.color);
+    }
+
     function buildPresets() {
         dom.presets.innerHTML = "";
         for (const [name, vals] of PRESETS) {
@@ -1854,6 +1932,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         selection.clear();
         selectedCells = [];
         syncFields();
+        updateHash();
 
         let res;
         try {
@@ -2306,6 +2385,14 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
     [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode, dom.granularity].forEach((i) =>
         i.addEventListener("change", render)
     );
+    // external hash changes (link pasted into the bar, back/forward) re-apply the
+    // config; updateHash() uses replaceState so our own writes don't fire this.
+    window.addEventListener("hashchange", () => {
+        if ((location.hash || "").replace(/^#/, "") === lastHash) return;
+        applyHash();
+        render();
+    });
+    applyHash();
     render();
 })();
 </script>
