@@ -1,6 +1,6 @@
 # tt-metal sharding visualizers
 
-Two JavaScript ports of tt-metal's data-layout model, with single-file HTML
+JavaScript ports of tt-metal's data-layout model, with single-file HTML
 visualizers and an overview landing page:
 
 - **Tensor sharding** (`tensor.html`) — the full **element → page → core** story.
@@ -12,6 +12,9 @@ visualizers and an overview landing page:
 - **Buffer page-mapping** (`buffer.html`) — the lower **page → core** layer:
   given a list of *pages*, which bank/core does each land in and at what shard
   offset? Ported from [`buffer.hpp`](../tt_metal/api/tt-metalium/buffer.hpp).
+- **Animated mappings** (`animated.html`) — a step-through of **interleaved**
+  mapping: configure tensor size, `ROW_MAJOR` / `TILE` page layout, tile size,
+  and core count, then watch pages get sliced and dealt round-robin onto cores.
 
 The tensor model sits on top of the buffer model: it adds the element-shape ÷
 layout step (`compute_physical_shape` → `get_page_shape`) the buffer model
@@ -20,17 +23,18 @@ assumes is already done, then hands the resulting page grid + shard shape to the
 
 ## Use it
 
-Open **`index.html`** for the overview, or open either single-file deliverable
-directly — both are fully self-contained (no network, no server):
+Open **`index.html`** for the overview, or open any deliverable directly — each
+is fully self-contained (no network, no server):
 
 - **`tensor_mapping_viz.html`** — the tensor visualizer.
 - **`page_mapping_viz.html`** — the buffer visualizer.
+- **`animated.html`** — the animated interleaved mapping walkthrough.
 
 ## Deploy (GitHub Pages)
 
 Pushing to `main` runs [.github/workflows/pages.yml](.github/workflows/pages.yml),
 which builds both single-file HTMLs, runs the tests, and publishes the site:
-`index.html` (overview), `buffer.html`, `tensor.html`.
+`index.html` (overview), `buffer.html`, `tensor.html`, `animated.html`.
 
 One-time setup: in the repo's **Settings → Pages**, set **Source = GitHub Actions**
 (Pages for a *private* repo requires a GitHub Pro/Team/Enterprise plan; for a Free
@@ -46,6 +50,7 @@ plan the repo must be public).
 | `page_mapping.js`       | Buffer algorithm: page → shard → bank. node (`require`) + browser (`window.PageMapping`). |
 | `app.js`                | Buffer visualizer UI. |
 | `buffer.html`           | Buffer dev shell. |
+| `animated.html`         | Animated interleaved mapping walkthrough (self-contained). |
 | `index.html`            | Overview landing page (self-contained). |
 | `style.css`             | Shared styling. |
 | `build.js`              | Inlines css/js into the dev shells → `tensor_mapping_viz.html` + `page_mapping_viz.html`. |

@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Animated mappings: step through interleaved page → core deal-out. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tt-metal animated mappings</title>
+    <style>
+        :root {
+            --bg: #0f1419;
+            --panel: #161b22;
+            --panel2: #1c2330;
+            --border: #2a3340;
+            --text: #d7dee8;
+            --muted: #8b97a7;
+            --accent: #4ea1ff;
+            --cell-w: 28px;
+            --cell-h: 22px;
+            color-scheme: dark;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        header {
+            padding: 16px 22px;
+            border-bottom: 1px solid var(--border);
+            background: var(--panel);
+        }
+        header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+        header p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+        header code { color: var(--accent); }
+        .topnav { display: flex; gap: 14px; align-items: center; margin-top: 8px; font-size: 12.5px; }
+        .topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
+        .topnav a:hover { color: var(--text); border-color: var(--border); }
+        .topnav a.active { color: var(--accent); border-color: var(--accent); }
+
+        .controls {
+            display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end;
+            padding: 12px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+        }
+        .controls .field { display: flex; flex-direction: column; gap: 4px; }
+        .controls label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+        .controls input, .controls select {
+            width: 72px; padding: 6px 8px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); font: inherit; font-size: 13px;
+        }
+        .controls select { width: 130px; }
+        .controls input:focus, .controls select:focus { outline: none; border-color: var(--accent); }
+        .controls .row2 { display: flex; gap: 6px; align-items: center; }
+        .controls .row2 span { color: var(--muted); font-size: 12px; }
+        .controls .field.tile-only.disabled { opacity: .35; pointer-events: none; }
+        .controls .apply {
+            font: inherit; font-size: 13px; padding: 7px 14px;
+            background: #1a3a5c; border: 1px solid var(--accent);
+            border-radius: 6px; color: #cfe6ff; cursor: pointer;
+        }
+        .controls .apply:hover { filter: brightness(1.08); }
+        .controls .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+        .controls .presets button {
+            font: inherit; font-size: 11px; padding: 6px 10px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 5px; color: var(--text); cursor: pointer;
+        }
+        .controls .presets button:hover { border-color: var(--accent); }
+        #cfgError {
+            flex: 1 1 100%;
+            background: #3a1d1d; border: 1px solid #7a3030; color: #ffb4b4;
+            padding: 8px 12px; border-radius: 6px; font-size: 12.5px;
+        }
+        #cfgError:empty { display: none; }
+
+        .toolbar {
+            display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+            padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+        }
+        .toolbar button {
+            font: inherit; font-size: 13px; padding: 7px 14px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); cursor: pointer;
+        }
+        .toolbar button:hover { border-color: var(--accent); }
+        .toolbar button.primary {
+            background: #1a3a5c; border-color: var(--accent); color: #cfe6ff;
+        }
+        .toolbar button:disabled { opacity: .4; cursor: default; }
+        .toolbar .state-label {
+            margin-left: 8px; color: var(--muted); font-size: 13px;
+        }
+        .toolbar .state-label strong { color: var(--text); font-weight: 600; }
+        .dots { display: flex; gap: 6px; margin-left: auto; }
+        .dots span {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--border); border: 1px solid var(--border);
+        }
+        .dots span.on { background: var(--accent); border-color: var(--accent); }
+
+        .stage {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 28px;
+            padding: 28px 22px 48px;
+            max-width: 1200px;
+            margin: 0 auto;
+            min-height: calc(100vh - 200px);
+        }
+        @media (max-width: 720px) {
+            .stage { grid-template-columns: 1fr; }
+        }
+
+        .pane h2 {
+            margin: 0 0 6px; font-size: 13px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .pane .sub {
+            margin: 0 0 16px; color: var(--muted); font-size: 12.5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .tensor-stack {
+            display: grid;
+            gap: 3px;
+            transition: gap .45s ease;
+            width: max-content;
+        }
+        .tensor-stack.sliced { gap: 14px; }
+
+        .page {
+            display: grid;
+            gap: 2px;
+            position: relative;
+            border-radius: 6px;
+            padding: 3px;
+            border: 1px solid transparent;
+            transition: opacity .2s ease, border-color .35s ease, background .35s ease, filter .2s ease;
+            width: max-content;
+        }
+        .tensor-stack.sliced .page {
+            border-color: #3a4555;
+            background: var(--panel);
+        }
+        .page.ghost {
+            opacity: 0; pointer-events: none; height: 0; margin: 0; padding: 0;
+            overflow: hidden; border: none;
+        }
+        .page-tag {
+            position: absolute; left: -52px; top: 50%; transform: translateY(-50%);
+            font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: var(--muted); white-space: nowrap; opacity: 0;
+            transition: opacity .3s ease;
+        }
+        .tensor-stack.sliced .page-tag { opacity: 1; }
+
+        .cell {
+            width: var(--cell-w); height: var(--cell-h);
+            border-radius: 3px;
+            background: #2a3340;
+            border: 1px solid #3a4555;
+            display: flex; align-items: center; justify-content: center;
+            font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: #c8d0dc;
+            transition: background .2s ease, border-color .2s ease, color .2s ease, opacity .15s ease, filter .15s ease;
+            cursor: pointer;
+            position: relative;
+        }
+
+        /* ---- hover modes ---- */
+        /* Tensor: individual element */
+        body.hl-mode-elem .cell:not(.hl-cell) {
+            opacity: .18;
+            filter: grayscale(1);
+        }
+        body.hl-mode-elem .cell.hl-cell {
+            opacity: 1;
+            filter: none;
+            outline: 2px solid #fff;
+            outline-offset: 0;
+            z-index: 3;
+        }
+        body.hl-mode-elem .core:not(.hl-core) { opacity: .4; }
+        body.hl-mode-elem .core.hl-core { opacity: 1; }
+
+        /* Core chrome: all elements that map to that core */
+        body.hl-mode-core .cell:not(.hl-cell) {
+            opacity: .16;
+            filter: grayscale(1);
+        }
+        body.hl-mode-core .cell.hl-cell {
+            opacity: 1;
+            filter: none;
+            outline: 1px solid #fff;
+            outline-offset: 0;
+            z-index: 2;
+        }
+        body.hl-mode-core .core:not(.hl-core) { opacity: .35; }
+        body.hl-mode-core .core.hl-core {
+            opacity: 1;
+            border-color: #fff;
+        }
+
+        /* Inside a core on a page/element: whole row/tile page */
+        body.hl-mode-page .page:not(.ghost):not(.hl) {
+            opacity: .22;
+            filter: grayscale(.7);
+        }
+        body.hl-mode-page .page.hl {
+            opacity: 1;
+            filter: none;
+            outline: 2px solid #fff;
+            outline-offset: 2px;
+            z-index: 2;
+        }
+        body.hl-mode-page .core:not(.hl-core) { opacity: .4; }
+        body.hl-mode-page .core.hl-core { opacity: 1; }
+
+        .cores {
+            display: flex; flex-direction: column; gap: 12px;
+        }
+        .core {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            min-height: 52px;
+            transition: border-color .3s ease, box-shadow .3s ease, opacity .15s ease;
+            cursor: pointer;
+        }
+        .core.lit {
+            border-color: var(--core-color, var(--accent));
+            box-shadow: 0 0 0 1px color-mix(in srgb, var(--core-color, var(--accent)) 35%, transparent);
+        }
+        .core-hd {
+            font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: var(--muted); margin-bottom: 8px;
+        }
+        .core-hd .sw {
+            display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+            margin-right: 6px; vertical-align: -1px;
+            background: var(--core-color, var(--border));
+        }
+        .core-slots {
+            display: flex; flex-direction: column; gap: 8px; min-height: 28px;
+        }
+        .core-slots .page {
+            border-color: color-mix(in srgb, var(--core-color, var(--border)) 55%, transparent);
+            background: color-mix(in srgb, var(--core-color, transparent) 12%, var(--panel));
+        }
+        .core-slots .placeholder {
+            color: var(--muted); font-size: 11px; font-style: italic; opacity: .5;
+        }
+
+        .flyer {
+            position: fixed; z-index: 20; pointer-events: none;
+            transition: left .55s cubic-bezier(.2,.8,.2,1), top .55s cubic-bezier(.2,.8,.2,1),
+                        opacity .2s ease;
+            box-shadow: 0 6px 18px rgba(0,0,0,.5);
+        }
+
+        .caption {
+            grid-column: 1 / -1;
+            margin-top: -8px;
+            padding: 12px 14px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+        .caption strong { color: var(--text); }
+        .caption code { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>tt-metal animated mappings</h1>
+        <p>
+            Step through how an interleaved tensor is sliced into pages and dealt
+            round-robin onto cores. Configure tensor size, page layout
+            (<code>ROW_MAJOR</code> / <code>TILE</code>), tile size, and core count.
+        </p>
+        <nav class="topnav">
+            <a href="index.html">Overview</a>
+            <a href="buffer.html">Buffer page-mapping</a>
+            <a href="tensor.html">Tensor sharding</a>
+            <a href="animated.html" class="active">Animated mappings</a>
+        </nav>
+    </header>
+
+    <div class="controls">
+        <div class="field">
+            <label>Tensor size</label>
+            <div class="row2">
+                <input id="inRows" type="number" min="1" max="32" value="12" title="rows" />
+                <span>×</span>
+                <input id="inCols" type="number" min="1" max="16" value="4" title="cols" />
+            </div>
+        </div>
+        <div class="field">
+            <label>Page layout</label>
+            <select id="inLayout">
+                <option value="TILE" selected>TILE</option>
+                <option value="ROW_MAJOR">ROW_MAJOR</option>
+            </select>
+        </div>
+        <div class="field tile-only" id="tileField">
+            <label>Tile size</label>
+            <div class="row2">
+                <input id="inTileH" type="number" min="1" max="16" value="4" title="tile rows" />
+                <span>×</span>
+                <input id="inTileW" type="number" min="1" max="16" value="4" title="tile cols" />
+            </div>
+        </div>
+        <div class="field">
+            <label>Cores</label>
+            <input id="inCores" type="number" min="1" max="16" value="4" />
+        </div>
+        <button class="apply" id="btnApply">Apply</button>
+        <div class="presets">
+            <button type="button" data-preset="tile">12×4 / 4×4 TILE</button>
+            <button type="button" data-preset="rm">8×3 ROW_MAJOR</button>
+        </div>
+        <div id="cfgError"></div>
+    </div>
+
+    <div class="toolbar">
+        <button id="btnReset">Reset</button>
+        <button id="btnPrev">← Prev</button>
+        <button id="btnNext" class="primary">Next →</button>
+        <button id="btnPlay">Play</button>
+        <span class="state-label">State <strong id="stateNum">1</strong> / 4 — <span id="stateName">whole tensor</span></span>
+        <div class="dots" id="dots" aria-hidden="true">
+            <span class="on"></span><span></span><span></span><span></span>
+        </div>
+    </div>
+
+    <div class="stage">
+        <div class="pane">
+            <h2>Tensor</h2>
+            <p class="sub" id="tensorSub"></p>
+            <div class="tensor-stack" id="tensorStack"></div>
+        </div>
+        <div class="pane">
+            <h2>Cores</h2>
+            <p class="sub" id="coresSub"></p>
+            <div class="cores" id="cores"></div>
+        </div>
+        <div class="caption" id="caption"></div>
+    </div>
+
+    <script>
+    const PALETTE = [
+        "#4ea1ff", "#7ee787", "#ffa657", "#d2a8ff",
+        "#ff7b72", "#79c0ff", "#a5d6ff", "#f2cc60",
+        "#56d364", "#e3b341", "#f778ba", "#a371f7",
+    ];
+    const colorFor = (i) => PALETTE[((i % PALETTE.length) + PALETTE.length) % PALETTE.length];
+
+    const inRows = document.getElementById("inRows");
+    const inCols = document.getElementById("inCols");
+    const inLayout = document.getElementById("inLayout");
+    const inTileH = document.getElementById("inTileH");
+    const inTileW = document.getElementById("inTileW");
+    const inCores = document.getElementById("inCores");
+    const tileField = document.getElementById("tileField");
+    const cfgError = document.getElementById("cfgError");
+
+    const tensorStack = document.getElementById("tensorStack");
+    const coresEl = document.getElementById("cores");
+    const captionEl = document.getElementById("caption");
+    const stateNum = document.getElementById("stateNum");
+    const stateName = document.getElementById("stateName");
+    const dots = [...document.getElementById("dots").children];
+    const btnPrev = document.getElementById("btnPrev");
+    const btnNext = document.getElementById("btnNext");
+    const btnPlay = document.getElementById("btnPlay");
+
+    /** @type {{ rows:number, cols:number, layout:string, pageH:number, pageW:number, pagesH:number, pagesW:number, numPages:number, numCores:number }} */
+    let cfg = null;
+    let state = 0;
+    let playing = false;
+    let playTimer = null;
+    let dealToken = 0;
+    let hoverKey = null;
+
+    function clearHover() {
+        hoverKey = null;
+        document.body.classList.remove("hl-mode-elem", "hl-mode-page", "hl-mode-core");
+        document.querySelectorAll(".hl, .hl-cell, .hl-core").forEach((el) => {
+            el.classList.remove("hl", "hl-cell", "hl-core");
+        });
+    }
+
+    function beginHover(mode, key) {
+        const k = `${mode}:${key}`;
+        if (hoverKey === k) return false;
+        clearHover();
+        hoverKey = k;
+        document.body.classList.add(`hl-mode-${mode}`);
+        return true;
+    }
+
+    /** Left tensor: highlight one element everywhere it appears. */
+    function setElemHover(r, c) {
+        if (!beginHover("elem", `${r},${c}`)) return;
+        document.querySelectorAll(`.cell[data-r="${r}"][data-c="${c}"]`).forEach((el) => {
+            el.classList.add("hl-cell");
+        });
+        if (cfg) {
+            const pageId = Math.floor(Number(r) / cfg.pageH) * cfg.pagesW + Math.floor(Number(c) / cfg.pageW);
+            const core = document.querySelector(`.core[data-core="${coreOf(pageId)}"]`);
+            if (core) core.classList.add("hl-core");
+        }
+    }
+
+    /** Core chrome: highlight every element that maps to this core. */
+    function setCoreHover(coreId) {
+        if (!beginHover("core", String(coreId))) return;
+        document.querySelectorAll(`.cell[data-core="${coreId}"]`).forEach((el) => {
+            el.classList.add("hl-cell");
+        });
+        const core = document.querySelector(`.core[data-core="${coreId}"]`);
+        if (core) core.classList.add("hl-core");
+    }
+
+    /** Inside a core on a page/element: highlight the whole row/tile page. */
+    function setPageHover(pageId) {
+        if (!beginHover("page", String(pageId))) return;
+        const id = String(pageId);
+        document.querySelectorAll(`.page[data-page="${id}"]`).forEach((el) => {
+            if (el.classList.contains("ghost")) return;
+            el.classList.add("hl");
+        });
+        if (cfg) {
+            const core = document.querySelector(`.core[data-core="${coreOf(Number(id))}"]`);
+            if (core) core.classList.add("hl-core");
+        }
+    }
+
+    function hoverFromEvent(e) {
+        const t = e.target;
+        if (!(t instanceof Element)) { clearHover(); return; }
+        const cell = t.closest(".cell[data-r]");
+        const page = t.closest(".page[data-page]");
+        const core = t.closest(".core[data-core]");
+        const inTensor = !!t.closest("#tensorStack");
+
+        if (page && page.classList.contains("ghost")) {
+            clearHover();
+            return;
+        }
+
+        // Left side → individual element
+        if (inTensor && cell) {
+            setElemHover(cell.dataset.r, cell.dataset.c);
+            return;
+        }
+        // Inside a core, on a page or its elements → whole page (row/tile)
+        if (core && page && (cell || t.closest(".page"))) {
+            setPageHover(page.dataset.page);
+            return;
+        }
+        // Core chrome (header / empty / padding) → all elements for that core
+        if (core) {
+            setCoreHover(core.dataset.core);
+            return;
+        }
+        clearHover();
+    }
+
+    document.addEventListener("pointerover", hoverFromEvent);
+    document.addEventListener("pointerout", (e) => {
+        const to = e.relatedTarget;
+        if (!(to instanceof Element) || !to.closest("#tensorStack, #cores")) {
+            clearHover();
+        }
+    });
+
+    function syncLayoutFields() {
+        const tile = inLayout.value === "TILE";
+        tileField.classList.toggle("disabled", !tile);
+    }
+
+    function readForm() {
+        return {
+            rows: Number(inRows.value),
+            cols: Number(inCols.value),
+            layout: inLayout.value,
+            tileH: Number(inTileH.value),
+            tileW: Number(inTileW.value),
+            numCores: Number(inCores.value),
+        };
+    }
+
+    function validate(raw) {
+        const { rows, cols, layout, tileH, tileW, numCores } = raw;
+        if (![rows, cols, numCores].every((n) => Number.isInteger(n) && n >= 1)) {
+            return "Tensor size and cores must be positive integers.";
+        }
+        if (rows > 32 || cols > 16) return "Keep tensor ≤ 32×16 so the stage stays readable.";
+        if (numCores > 16) return "Keep cores ≤ 16.";
+        if (layout === "TILE") {
+            if (![tileH, tileW].every((n) => Number.isInteger(n) && n >= 1)) {
+                return "Tile size must be positive integers.";
+            }
+            if (rows % tileH !== 0 || cols % tileW !== 0) {
+                return `Tensor ${rows}×${cols} must be divisible by tile ${tileH}×${tileW}.`;
+            }
+            if (tileH > rows || tileW > cols) return "Tile size cannot exceed tensor size.";
+        }
+        return null;
+    }
+
+    function buildCfg(raw) {
+        const layout = raw.layout;
+        const pageH = layout === "TILE" ? raw.tileH : 1;
+        const pageW = layout === "TILE" ? raw.tileW : raw.cols;
+        const pagesH = raw.rows / pageH;
+        const pagesW = raw.cols / pageW;
+        return {
+            rows: raw.rows,
+            cols: raw.cols,
+            layout,
+            pageH,
+            pageW,
+            pagesH,
+            pagesW,
+            numPages: pagesH * pagesW,
+            numCores: raw.numCores,
+        };
+    }
+
+    function coreOf(pageId) {
+        return pageId % cfg.numCores;
+    }
+
+    function pageLabel() {
+        return `${cfg.pageH}×${cfg.pageW}`;
+    }
+
+    function statesFor() {
+        const unit = cfg.layout === "TILE" ? "tile" : "row";
+        const unitPlural = cfg.layout === "TILE" ? "tiles" : "row pages";
+        return [
+            {
+                name: "whole tensor",
+                caption: `<strong>State 1.</strong> Introduce a <code>${cfg.rows}×${cfg.cols}</code> tensor in <code>${cfg.layout}</code> layout. Cores sit empty on the right.`,
+            },
+            {
+                name: cfg.layout === "TILE" ? "sliced into tiles" : "sliced row-wise",
+                caption: `<strong>State 2.</strong> Cut into <code>${pageLabel()}</code> pages — a <code>${cfg.pagesH}×${cfg.pagesW}</code> page grid (<code>${cfg.numPages}</code> ${unitPlural}). Gaps show the cut.`,
+            },
+            {
+                name: "dealt to cores",
+                caption: `<strong>State 3.</strong> Deal ${unitPlural} round-robin: ${unit} <code>i → core (i % ${cfg.numCores})</code>.`,
+            },
+            {
+                name: "tensor as core map",
+                caption: `<strong>State 4.</strong> Original tensor returns, colored by destination core. Cores keep their dealt pages.`,
+            },
+        ];
+    }
+
+    function tuneCellSize() {
+        const n = cfg.rows * cfg.cols;
+        let w = 28, h = 22;
+        if (n > 96) { w = 22; h = 18; }
+        if (n > 160) { w = 18; h = 14; }
+        if (cfg.cols > 8) { w = Math.min(w, 20); }
+        document.documentElement.style.setProperty("--cell-w", `${w}px`);
+        document.documentElement.style.setProperty("--cell-h", `${h}px`);
+    }
+
+    function paintCell(cell, pageId, colored) {
+        if (!colored) {
+            cell.style.background = "";
+            cell.style.borderColor = "";
+            cell.style.color = "";
+            cell.style.fontWeight = "";
+            return;
+        }
+        const col = colorFor(coreOf(pageId));
+        cell.style.background = col;
+        cell.style.borderColor = col;
+        cell.style.color = "#0f1419";
+        cell.style.fontWeight = "600";
+    }
+
+    function makePageEl(pageId, { colored = false, inCore = false, showTag = true } = {}) {
+        const pr = Math.floor(pageId / cfg.pagesW);
+        const pc = pageId % cfg.pagesW;
+        const page = document.createElement("div");
+        page.className = "page";
+        page.dataset.page = String(pageId);
+        page.style.gridTemplateColumns = `repeat(${cfg.pageW}, var(--cell-w))`;
+        page.style.gridTemplateRows = `repeat(${cfg.pageH}, var(--cell-h))`;
+        if (inCore) page.style.setProperty("--core-color", colorFor(coreOf(pageId)));
+        if (showTag && !inCore) {
+            const tag = document.createElement("span");
+            tag.className = "page-tag";
+            tag.textContent = pageLabel();
+            page.appendChild(tag);
+        }
+        const destCore = coreOf(pageId);
+        page.dataset.core = String(destCore);
+        for (let dr = 0; dr < cfg.pageH; dr++) {
+            for (let dc = 0; dc < cfg.pageW; dc++) {
+                const r = pr * cfg.pageH + dr;
+                const c = pc * cfg.pageW + dc;
+                const cell = document.createElement("div");
+                cell.className = "cell";
+                cell.dataset.r = String(r);
+                cell.dataset.c = String(c);
+                cell.dataset.page = String(pageId);
+                cell.dataset.core = String(destCore);
+                cell.textContent = `${r},${c}`;
+                paintCell(cell, pageId, colored);
+                page.appendChild(cell);
+            }
+        }
+        return page;
+    }
+
+    function buildCoresSkeleton() {
+        coresEl.innerHTML = "";
+        for (let i = 0; i < cfg.numCores; i++) {
+            const core = document.createElement("div");
+            core.className = "core";
+            core.dataset.core = String(i);
+            core.style.setProperty("--core-color", colorFor(i));
+            core.innerHTML =
+                `<div class="core-hd"><span class="sw"></span>Core ${i}</div>` +
+                `<div class="core-slots" data-slots="${i}"><span class="placeholder">(empty)</span></div>`;
+            coresEl.appendChild(core);
+        }
+    }
+
+    function clearCoreSlots() {
+        for (let i = 0; i < cfg.numCores; i++) {
+            const slots = coresEl.querySelector(`[data-slots="${i}"]`);
+            slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            coresEl.querySelector(`[data-core="${i}"]`).classList.remove("lit");
+        }
+    }
+
+    function fillCoreSlots() {
+        for (let i = 0; i < cfg.numCores; i++) {
+            const slots = coresEl.querySelector(`[data-slots="${i}"]`);
+            slots.innerHTML = "";
+            let any = false;
+            for (let p = 0; p < cfg.numPages; p++) {
+                if (coreOf(p) !== i) continue;
+                any = true;
+                slots.appendChild(makePageEl(p, { colored: true, inCore: true }));
+            }
+            if (!any) slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            coresEl.querySelector(`[data-core="${i}"]`).classList.toggle("lit", any);
+        }
+    }
+
+    function buildTensor({ sliced, colored, ghost }) {
+        tensorStack.innerHTML = "";
+        tensorStack.classList.toggle("sliced", !!sliced);
+        tensorStack.style.gridTemplateColumns = `repeat(${cfg.pagesW}, max-content)`;
+        for (let p = 0; p < cfg.numPages; p++) {
+            const page = makePageEl(p, { colored: !!colored, showTag: true });
+            if (ghost) page.classList.add("ghost");
+            if (!sliced && !colored) page.style.padding = "0";
+            tensorStack.appendChild(page);
+        }
+    }
+
+    function updateChrome() {
+        const STATES = statesFor();
+        stateNum.textContent = String(state + 1);
+        stateName.textContent = STATES[state].name;
+        captionEl.innerHTML = STATES[state].caption;
+        dots.forEach((d, i) => d.classList.toggle("on", i === state));
+        btnPrev.disabled = state === 0 || playing;
+        btnNext.disabled = state === STATES.length - 1 || playing;
+
+        const shape = `shape [${cfg.rows}, ${cfg.cols}]`;
+        const lay = cfg.layout === "TILE"
+            ? `TILE ${cfg.pageH}×${cfg.pageW}`
+            : "ROW_MAJOR";
+        document.getElementById("tensorSub").textContent =
+            state === 1 ? `pages: ${cfg.numPages} × [${cfg.pageH}, ${cfg.pageW}] · ${cfg.layout}`
+            : state === 3 ? `${shape} · colored by core (page i % ${cfg.numCores})`
+            : `${shape} · ${lay}`;
+        document.getElementById("coresSub").textContent =
+            `${cfg.numCores} cores · interleaved (page i → core i % ${cfg.numCores})`;
+    }
+
+    function sleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+    }
+
+    async function animateDeal() {
+        const token = ++dealToken;
+        buildTensor({ sliced: true, colored: false, ghost: false });
+        clearCoreSlots();
+        for (let i = 0; i < cfg.numCores; i++) {
+            coresEl.querySelector(`[data-slots="${i}"]`).innerHTML = "";
+        }
+
+        const pagePxH = cfg.pageH * (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell-h")) + 2) + 8;
+
+        for (let p = 0; p < cfg.numPages; p++) {
+            if (token !== dealToken) return;
+            const src = tensorStack.querySelector(`[data-page="${p}"]`);
+            const coreId = coreOf(p);
+            const slots = coresEl.querySelector(`[data-slots="${coreId}"]`);
+            const coreBox = coresEl.querySelector(`[data-core="${coreId}"]`);
+
+            const srcRect = src.getBoundingClientRect();
+            const destProbe = document.createElement("div");
+            destProbe.style.height = `${pagePxH}px`;
+            destProbe.style.width = "1px";
+            slots.appendChild(destProbe);
+            const destRect = destProbe.getBoundingClientRect();
+            destProbe.remove();
+
+            const flyer = makePageEl(p, { colored: true, inCore: true, showTag: false });
+            flyer.className = "page flyer";
+            flyer.style.left = `${srcRect.left}px`;
+            flyer.style.top = `${srcRect.top}px`;
+            document.body.appendChild(flyer);
+
+            src.style.opacity = "0";
+            coreBox.classList.add("lit");
+
+            flyer.getBoundingClientRect();
+            flyer.style.left = `${destRect.left}px`;
+            flyer.style.top = `${destRect.top}px`;
+
+            await sleep(580);
+            if (token !== dealToken) { flyer.remove(); return; }
+
+            flyer.remove();
+            slots.appendChild(makePageEl(p, { colored: true, inCore: true }));
+            src.classList.add("ghost");
+        }
+
+        for (let i = 0; i < cfg.numCores; i++) {
+            const slots = coresEl.querySelector(`[data-slots="${i}"]`);
+            if (!slots.children.length) {
+                slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            }
+        }
+
+        buildTensor({ sliced: false, colored: false, ghost: true });
+    }
+
+    async function goTo(next, { animate = true } = {}) {
+        dealToken++;
+        clearHover();
+        document.querySelectorAll(".flyer").forEach((f) => f.remove());
+
+        const prev = state;
+        state = next;
+        updateChrome();
+
+        if (state === 0) {
+            buildTensor({ sliced: false, colored: false, ghost: false });
+            clearCoreSlots();
+        } else if (state === 1) {
+            buildTensor({ sliced: true, colored: false, ghost: false });
+            clearCoreSlots();
+        } else if (state === 2) {
+            if (animate && prev === 1) {
+                await animateDeal();
+            } else {
+                buildTensor({ sliced: false, colored: false, ghost: true });
+                fillCoreSlots();
+            }
+        } else if (state === 3) {
+            buildTensor({ sliced: false, colored: true, ghost: false });
+            fillCoreSlots();
+        }
+    }
+
+    function stopPlay() {
+        playing = false;
+        btnPlay.textContent = "Play";
+        if (playTimer) { clearTimeout(playTimer); playTimer = null; }
+        if (cfg) updateChrome();
+    }
+
+    async function play() {
+        if (playing) { stopPlay(); return; }
+        playing = true;
+        btnPlay.textContent = "Pause";
+        if (state === 3) await goTo(0, { animate: false });
+        while (playing && state < 3) {
+            updateChrome();
+            await goTo(state + 1, { animate: true });
+            if (!playing) break;
+            if (state < 3) {
+                await new Promise((resolve) => {
+                    playTimer = setTimeout(resolve, state === 2 ? 400 : 900);
+                });
+            }
+        }
+        stopPlay();
+    }
+
+    function applyConfig() {
+        stopPlay();
+        dealToken++;
+        clearHover();
+        document.querySelectorAll(".flyer").forEach((f) => f.remove());
+        const raw = readForm();
+        const err = validate(raw);
+        cfgError.textContent = err || "";
+        if (err) return;
+        cfg = buildCfg(raw);
+        tuneCellSize();
+        buildCoresSkeleton();
+        state = 0;
+        goTo(0, { animate: false });
+        // Persist in hash for sharing / refresh
+        const q = new URLSearchParams({
+            rows: String(cfg.rows),
+            cols: String(cfg.cols),
+            layout: cfg.layout,
+            tileH: String(cfg.layout === "TILE" ? cfg.pageH : Number(inTileH.value)),
+            tileW: String(cfg.layout === "TILE" ? cfg.pageW : Number(inTileW.value)),
+            cores: String(cfg.numCores),
+        });
+        history.replaceState(null, "", `#${q.toString()}`);
+    }
+
+    function loadFromHash() {
+        const h = location.hash.replace(/^#/, "");
+        if (!h) return;
+        const q = new URLSearchParams(h);
+        if (q.has("rows")) inRows.value = q.get("rows");
+        if (q.has("cols")) inCols.value = q.get("cols");
+        if (q.has("layout")) inLayout.value = q.get("layout");
+        if (q.has("tileH")) inTileH.value = q.get("tileH");
+        if (q.has("tileW")) inTileW.value = q.get("tileW");
+        if (q.has("cores")) inCores.value = q.get("cores");
+    }
+
+    function setPreset(name) {
+        if (name === "tile") {
+            inRows.value = 12; inCols.value = 4;
+            inLayout.value = "TILE";
+            inTileH.value = 4; inTileW.value = 4;
+            inCores.value = 4;
+        } else if (name === "rm") {
+            inRows.value = 8; inCols.value = 3;
+            inLayout.value = "ROW_MAJOR";
+            inTileH.value = 4; inTileW.value = 4;
+            inCores.value = 4;
+        }
+        syncLayoutFields();
+        applyConfig();
+    }
+
+    inLayout.addEventListener("change", syncLayoutFields);
+    document.getElementById("btnApply").onclick = () => applyConfig();
+    document.querySelectorAll("[data-preset]").forEach((b) => {
+        b.onclick = () => setPreset(b.dataset.preset);
+    });
+    // Enter in inputs applies
+    document.querySelectorAll(".controls input, .controls select").forEach((el) => {
+        el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") applyConfig();
+        });
+    });
+
+    document.getElementById("btnReset").onclick = () => { stopPlay(); goTo(0, { animate: false }); };
+    btnPrev.onclick = () => goTo(state - 1, { animate: false });
+    btnNext.onclick = () => goTo(state + 1, { animate: true });
+    btnPlay.onclick = () => play();
+
+    loadFromHash();
+    syncLayoutFields();
+    applyConfig();
+    </script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Landing / overview page for the visualizer site. Self-contained (inline CSS)
-     so it needs no assets. Links to the two single-file visualizers. -->
+     so it needs no assets. Links to the three visualizers. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
@@ -17,12 +17,12 @@
             margin: 0; background: var(--bg); color: var(--text);
             font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
         }
-        .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px 80px; }
+        .wrap { max-width: 960px; margin: 0 auto; padding: 48px 24px 80px; }
         h1 { font-size: 26px; margin: 0 0 6px; }
         .sub { color: var(--muted); margin: 0 0 36px; }
         code { color: var(--accent); background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-        .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
-        @media (max-width: 680px) { .cards { grid-template-columns: 1fr; } }
+        .cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
+        @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } }
         .card {
             display: block; text-decoration: none; color: inherit;
             background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 22px;
@@ -44,7 +44,7 @@
         <h1>tt-metal sharding visualizers</h1>
         <p class="sub">
             Interactive JavaScript ports of tt-metal's data-layout model — how a tensor's elements
-            end up scattered across device cores. Two layers, two pages:
+            end up scattered across device cores. Three ways in:
         </p>
 
         <div class="cards">
@@ -76,6 +76,19 @@
                     <span class="chip">grid (width / block)</span><span class="chip">ND</span>
                 </div>
             </a>
+
+            <a class="card" href="animated.html">
+                <h2>Animated mappings →</h2>
+                <p>
+                    Watch interleaved mapping unfold: a tensor is sliced into pages
+                    (<code>ROW_MAJOR</code> or <code>TILE</code>) and dealt round-robin onto cores.
+                </p>
+                <div class="flow">tensor → pages → cores (animated)</div>
+                <div style="margin-top:10px">
+                    <span class="chip">interleave</span><span class="chip">row major</span>
+                    <span class="chip">tile</span><span class="chip">step-through</span>
+                </div>
+            </a>
         </div>
 
         <div class="note">
@@ -84,7 +97,8 @@
                 The buffer model assumes shapes are already <em>in pages</em>. The tensor model adds the
                 missing step in front of it: folding an element shape into pages via the layout
                 (<code>compute_physical_shape</code> → <code>get_page_shape</code>), then handing the
-                resulting page grid + shard shape to the very same page → core logic. Sources:
+                resulting page grid + shard shape to the very same page → core logic. Animated mappings
+                tells the interleaved half of that story as a short step-through. Sources:
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/experimental/tensor/spec/tensor_spec.hpp">tensor_spec.hpp</a>,
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/buffer.hpp">buffer.hpp</a>.
             </p>

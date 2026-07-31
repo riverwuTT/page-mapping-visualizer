@@ -7,6 +7,7 @@
 //        → page_mapping_viz.html
 //   tensor.html  + style.css + page_mapping.js + tensor_mapping.js + tensor_app.js
 //        → tensor_mapping_viz.html
+//   animated.html is already self-contained (no build step; deployed as-is).
 
 const fs = require("fs");
 const path = require("path");
