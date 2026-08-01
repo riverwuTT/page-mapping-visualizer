@@ -134,6 +134,43 @@ eq(T.recommendedShardAlignment(T.pageConfig("ROW_MAJOR"), "FLOAT32"), [16], "rm 
     eq(r.mapping.numBanks, 4, "E 4 cores");
 }
 
+// ---- N-D padding vs folded logical_2d (rank-3 middle-dim pad) --------------
+// logical [3,7,3] + alignment [1,3,2] → padded [3,9,4], physical [27,4].
+// isPadding must use N-D bounds: every z-plane keeps y=0..6 real. Folding only
+// logical_2d [21,3] would false-pad z=2 y≥3 (r = 2·9+y ≥ 21).
+{
+    const r = T.computeTensorMapping({
+        logicalShape: [3, 7, 3],
+        layout: "ROW_MAJOR",
+        sharding: "nd",
+        ndShardShape: [1, 3, 2],
+        grid: { x: 2, y: 2 },
+        ndStrategy: "round_robin",
+        ndAlignment: "REQUIRED",
+        alignment: [1, 3, 2],
+    });
+    eq(r.paddedShape, [3, 9, 4], "ND pad: padded shape");
+    eq(r.physical, [27, 4], "ND pad: physical");
+    eq(r.logical2d, [21, 3], "ND pad: logical_2d fold");
+    // z=2, y=3..6 are logical — must NOT be padding (the visualizer bug)
+    ok(!r.element.isPadding(2 * 9 + 3, 0), "ND pad: z=2 y=3 is real");
+    ok(!r.element.isPadding(2 * 9 + 6, 2), "ND pad: z=2 y=6 x=2 is real");
+    // y=7..8 are padded middle dim on every plane
+    ok(r.element.isPadding(0 * 9 + 7, 0), "ND pad: z=0 y=7 is pad");
+    ok(r.element.isPadding(2 * 9 + 7, 0), "ND pad: z=2 y=7 is pad");
+    // x=3 is padded width
+    ok(r.element.isPadding(0, 3), "ND pad: x=3 is pad");
+    ok(!r.element.isPadding(0, 2), "ND pad: x=2 is real");
+    // Count real cells in physical grid — should equal logical volume 3·7·3 = 63
+    let real = 0;
+    for (let rr = 0; rr < r.element.H; rr++) {
+        for (let cc = 0; cc < r.element.W; cc++) {
+            if (!r.element.isPadding(rr, cc)) real++;
+        }
+    }
+    eq(real, 63, "ND pad: real cell count = logical volume");
+}
+
 // ---- custom Alignment (TensorLayout 4th ctor arg) ---------------------------
 // Empty Alignment{} → create_default_alignment. Non-empty is merged via
 // initialize_alignment (each user dim rounded up to the layout default).

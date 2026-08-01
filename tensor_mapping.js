@@ -506,13 +506,55 @@
     // Tile the physical 2D shape by the page shape. Page ids are row-major over the
     // page grid — identical ordering to the buffer-level tensor_shape_in_pages, so
     // a page id means the same thing in both the element view and the page→core view.
-    //   element (r, c) → page (⌊r/ph⌋·pagesW + ⌊c/pw⌋); padding when r≥lh or c≥lw.
-    function elementToPage(physical, pageShape, logical2d) {
+    //   element (r, c) → page (⌊r/ph⌋·pagesW + ⌊c/pw⌋)
+    //
+    // Padding is decided in N-D: physical (r,c) unravels over the padded shape
+    // (height = row-major fold of all-but-last padded dims, width = last dim), then
+    // each coord is compared to logical_shape. Using folded logical_2d alone is
+    // wrong when a middle dim is padded (e.g. logical [3,7,3] / padded [3,9,4] —
+    // logical (2,3,*) must stay real, not be clipped by logical_2d height 21).
+    function elementToPage(physical, pageShape, logicalShape, paddedShape) {
         const [H, W] = physical;
         const [ph, pw] = pageShape;
         const pagesH = divUp(H, ph);
         const pagesW = divUp(W, pw);
+        const logical = logicalShape.slice();
+        const padded =
+            paddedShape && paddedShape.length ? paddedShape.slice() : computeLogical2dShape(logical);
+        const logical2d = computeLogical2dShape(logical);
         const [lh, lw] = logical2d;
+        const lead = padded.length >= 2 ? padded.slice(0, -1) : [1];
+        const leadVol = volume(lead);
+        const pLast = padded.length ? padded[padded.length - 1] : 1;
+
+        function isPadding(r, c) {
+            if (r < 0 || c < 0 || r >= H || c >= W) return true;
+            if (c >= pLast) return true;
+            // Rows beyond the padded leading volume (higher-dim alignment round-up)
+            // have no N-D coordinate — treat as padding.
+            if (r >= leadVol) return true;
+            const coords = new Array(padded.length);
+            if (padded.length === 1) {
+                coords[0] = c;
+            } else {
+                coords[padded.length - 1] = c;
+                let rest = r;
+                for (let d = lead.length - 1; d >= 0; d--) {
+                    coords[d] = rest % lead[d];
+                    rest = Math.floor(rest / lead[d]);
+                }
+            }
+            // Logical dims are right-aligned into the padded / physical coords.
+            const rankDiff = coords.length - logical.length;
+            for (let i = 0; i < rankDiff; i++) {
+                if (coords[i] !== 0) return true;
+            }
+            for (let i = 0; i < logical.length; i++) {
+                if (coords[rankDiff + i] >= logical[i]) return true;
+            }
+            return false;
+        }
+
         return {
             H,
             W,
@@ -522,11 +564,13 @@
             pagesW,
             logicalH: lh,
             logicalW: lw,
+            logicalShape: logical,
+            paddedShape: padded,
             // page id of element (r, c)
             pageOf: (r, c) => Math.floor(r / ph) * pagesW + Math.floor(c / pw),
             // offset within its page (row-major in-page)
             slotOf: (r, c) => (r % ph) * pw + (c % pw),
-            isPadding: (r, c) => r >= lh || c >= lw,
+            isPadding,
         };
     }
 
@@ -591,7 +635,7 @@
         }
 
         const bufArgs = computeBufferShardingArgs(spec);
-        const em = elementToPage(bufArgs.physical, bufArgs.pageShape, spec.logical2d);
+        const em = elementToPage(bufArgs.physical, bufArgs.pageShape, spec.logicalShape, spec.paddedShape);
 
         // Delegate page → core to the buffer-level model (page_mapping.js).
         let mapping;

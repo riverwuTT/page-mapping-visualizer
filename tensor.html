@@ -125,6 +125,16 @@
                     <input type="text" id="customAlignment" value="" placeholder="default" />
                     <div class="hint">Optional <code>Alignment</code> arg to <code>TensorLayout(dtype, page_config, memory_config, alignment = {})</code>. Blank = <code>create_default_alignment</code>; otherwise merged by <code>initialize_alignment</code> (each dim rounded up to the default).</div>
                 </div>
+                <label class="toggle adv-toggle">
+                    <input type="checkbox" id="showElementCores" checked />
+                    Show elements → cores
+                </label>
+                <div class="hint">Final per-core view of which elements land where (below shards → cores).</div>
+                <label class="toggle adv-toggle">
+                    <input type="checkbox" id="cube3d" checked />
+                    3D cube
+                </label>
+                <div class="hint">On by default. Rank-3 elements / page grid / shards render as rotatable cubes of layers; uncheck for flat 2D.</div>
             </details>
         </div>
 
@@ -146,6 +156,7 @@
                     <option value="page">pages</option>
                 </select>
             </div>
+            <div class="cubenote" id="cubeNote"></div>
             <div class="draghint">Click an element / tile / page / shard / core to toggle its highlight — the same page lights up across every view.</div>
             <div id="selbar"></div>
 
@@ -163,6 +174,12 @@
 
             <h2 class="section">② shards → cores (device pages, shards stacked per core)</h2>
             <div class="banks" id="banksView"></div>
+
+            <div id="elementCoresSection">
+                <h2 class="section">Result: elements → core</h2>
+                <div class="draghint">Each core shows the elements it owns — same core grid as shards → cores, linked highlight.</div>
+                <div class="banks" id="elementCoresView"></div>
+            </div>
 
             <h2 class="section">stats</h2>
             <div class="summary" id="summary"></div>

@@ -37,6 +37,25 @@ ok(dom.window.PageMapping && typeof dom.window.PageMapping.computeMapping === "f
 ok(errText() === "", `default boot no error (got "${errText()}")`);
 ok(elementCells() > 0 && pageCells() > 0 && shardCards() > 0 && bankCols() > 0, "default boot renders all views");
 
+// Result: elements → core and 3D cube are on by default — verify once, then turn
+// both off for the bulk of the smoke test (rebuilding thousands of ecells / cube
+// planes on every drive() is too slow under jsdom). Dedicated tests re-enable below.
+{
+    const section = document.getElementById("elementCoresSection");
+    const toggle = document.getElementById("showElementCores");
+    const cube = document.getElementById("cube3d");
+    ok(toggle && toggle.checked, "Show elements → cores is on by default");
+    ok(cube && cube.checked, "3D cube is on by default");
+    ok(document.querySelector("details.advanced #cube3d"), "3D cube toggle lives under Advanced");
+    ok(section && section.style.display !== "none", "Result section visible on default boot");
+    ok(document.querySelectorAll("#elementCoresView .bank").length === 4, "Result section renders 4 core cards on boot");
+    ok(document.querySelectorAll("#elementCoresView .ecell").length > 0, "Result section draws element cells on boot");
+    toggle.checked = false;
+    toggle.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    cube.checked = false;
+    cube.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+}
+
 function drive(cfg) {
     set("logicalShape", cfg.logicalShape);
     set("layout", cfg.layout);
@@ -272,6 +291,80 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     set("customAlignment", ""); // restore for later tests
 }
 
+// ---- Advanced → Show elements → cores (Result section) --------------------
+{
+    const section = document.getElementById("elementCoresSection");
+    const toggle = document.getElementById("showElementCores");
+    const heading = section && section.querySelector("h2.section");
+    ok(section && toggle, "Result elements→core section + Advanced toggle present");
+    ok(heading && /Result:\s*elements\s*→\s*core/.test(heading.textContent), `Result heading text (got "${heading && heading.textContent}")`);
+
+    // Use a small shape so re-enabling the Result view stays cheap under jsdom.
+    drive({ logicalShape: "8,8", layout: "ROW_MAJOR", sharding: "block", gridX: 2, gridY: 2 });
+    toggle.checked = true;
+    toggle.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    ok(section.style.display !== "none", "Result section visible when toggle on");
+    const coreCards = () => document.querySelectorAll("#elementCoresView .bank").length;
+    ok(coreCards() === 4, `Result section renders 4 core cards (got ${coreCards()})`);
+    ok(document.querySelectorAll("#elementCoresView .ecell").length > 0, "Result section draws element cells");
+
+    // uncheck → hide
+    toggle.checked = false;
+    toggle.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    ok(section.style.display === "none", "unchecking Advanced toggle hides Result section");
+    ok(document.querySelectorAll("#elementCoresView .bank").length === 0, "hidden Result section clears core cards");
+}
+
+// ---- experimental 3D cube (front mapping + ND rank-3 page grid) -----------
+{
+    const click = (el) => el.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    const cube = document.getElementById("cube3d");
+    ok(cube, "3D cube toggle present under Advanced");
+
+    // Re-enable (bulk tests left it off). Front Elements → Shards: RM ND [4,15,16]
+    // has padded rank-3 [4,15,32].
+    set("granularity", "element");
+    set("colorMode", "shard");
+    cube.checked = true;
+    cube.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    drive({ logicalShape: "4,15,16", layout: "ROW_MAJOR", sharding: "nd", ndShardShape: "2,4,6", gridX: 2, gridY: 2, ndStrategy: "round_robin" });
+    ok(errText() === "", `RM ND element cube no error (got "${errText()}")`);
+    ok(document.querySelectorAll("#elementView .cube-stage").length === 1, "front element cube stage rendered when on");
+    ok(document.querySelectorAll("#elementView .cube-plane").length === 4, "one plane per padded dim0 (=4)");
+    ok(document.querySelectorAll("#elementView .ecell").length === 4 * 15 * 32, "padded 4×15×32 element cells in cube");
+
+    const ecell = document.querySelector("#elementView .ecell[data-page]");
+    click(ecell);
+    ok(document.querySelectorAll(`.ecell[data-page="${ecell.dataset.page}"].sel, .cell[data-page="${ecell.dataset.page}"].sel`).length >= 2,
+        "front cube ecell click highlights across views");
+    click(document.querySelector("#selbar button"));
+
+    // Advanced uncheck → flat front view
+    cube.checked = false;
+    cube.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    ok(document.querySelectorAll("#elementView .cube-stage").length === 0, "unchecking Advanced 3D cube flattens front view");
+    ok(document.querySelectorAll("#elementView .elemgrid").length === 1, "flat elemgrid restored when cube off");
+
+    // TILE ND with cube on: page-grid + shard cubes
+    cube.checked = true;
+    cube.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+    set("granularity", "page");
+    drive({ logicalShape: "2,64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,32,32", gridX: 2, gridY: 2, ndStrategy: "round_robin" });
+    ok(document.querySelectorAll("#elementView .cube-stage").length === 1, "front page view cubes rank-3 page grid");
+    ok(document.querySelectorAll("#pageStrip .cube-stage").length === 1, "page-grid cube stage rendered");
+    ok(document.querySelectorAll("#pageStrip .cube-plane").length === 2, "one plane per z (pageGrid d0=2)");
+    ok(document.querySelectorAll("#shardsView .cube-stage").length === 8, "each rank-3 ND shard is a cube");
+
+    // non-rank-3 (classic block) with cube on → note + flat fallback
+    set("granularity", "element");
+    drive({ logicalShape: "64,64", layout: "TILE", sharding: "block", gridX: 2, gridY: 2 });
+    ok(document.getElementById("cubeNote").textContent.length > 0, "cube note shown for non-rank-3");
+    ok(document.querySelectorAll("#elementView .cube-stage").length === 0, "non-rank-3 front view stays flat");
+    ok(document.querySelectorAll("#pageStrip .cube-stage").length === 0, "non-rank-3 page grid stays flat");
+    cube.checked = false;
+    cube.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+}
+
 // ---- shareable link: config <-> URL hash round-trip ------------------------
 // Uses fresh documents booted at a real URL (the shared jsdom above is about:blank,
 // where history.replaceState is a no-op).
@@ -279,7 +372,8 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     const boot = (u) => new JSDOM(html, { runScripts: "dangerously", pretendToBeVisual: true, url: u });
 
     // write: driving the controls mirrors the config into location.hash
-    const jw = boot("https://x/tensor.html");
+    // elcores=0 / cube3d=0 keep heavy views off under jsdom for boots that don't test them.
+    const jw = boot("https://x/tensor.html#elcores=0,cube3d=0");
     const dw = jw.window.document;
     const setw = (id, v) => {
         const e = dw.getElementById(id);
@@ -300,11 +394,13 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     ok(/sw=16/.test(h), "hash carries explicit shard width");
     ok(/show=tile/.test(h) && /color=shard/.test(h), "hash carries granularity + color mode");
     ok(/tile=32x32/.test(h), "hash carries tile shape in TILE layout");
+    ok(/elcores=0/.test(h), "hash keeps elcores=0 when Result section is off");
+    ok(/cube3d=0/.test(h), "hash keeps cube3d=0 when 3D cube is off");
 
     // read: booting AT a hash restores that configuration and renders it
     const jr = boot(
         "https://x/tensor.html#shape=2x64x64,layout=TILE,sharding=nd,grid=2x2," +
-        "ndshape=1x32x32,ndstrat=round_robin,ndalign=RECOMMENDED,show=page,color=core"
+        "ndshape=1x32x32,ndstrat=round_robin,ndalign=RECOMMENDED,elcores=0,cube3d=0,show=page,color=core"
     );
     const dr = jr.window.document;
     ok(dr.getElementById("logicalShape").value === "2,64,64", `restored shape (got "${dr.getElementById("logicalShape").value}")`);
@@ -315,16 +411,43 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     ok(dr.querySelectorAll("#elementView .pcell").length > 0, "restored page view renders page cells");
 
     // a classic-shard link restores the explicit shard dimension
-    const jc = boot("https://x/tensor.html#shape=64x96,layout=TILE,sharding=width,grid=2x1,sw=32,show=element,color=core");
+    const jc = boot("https://x/tensor.html#shape=64x96,layout=TILE,sharding=width,grid=2x1,sw=32,elcores=0,cube3d=0,show=element,color=core");
     const dc = jc.window.document;
     ok(dc.getElementById("shardW").value === "32", `restored explicit shard width (got "${dc.getElementById("shardW").value}")`);
     ok(dc.querySelectorAll("#shardsView .shard-card").length === 3, "restored classic shard renders 3 shards");
 
     // custom alignment round-trips through the hash
-    const ja = boot("https://x/tensor.html#shape=30x30,layout=TILE,sharding=interleave,banks=4x1,align=64x64,show=element,color=core");
+    const ja = boot("https://x/tensor.html#shape=30x30,layout=TILE,sharding=interleave,banks=4x1,align=64x64,elcores=0,cube3d=0,show=element,color=core");
     const da = ja.window.document;
     ok(da.getElementById("customAlignment").value === "64,64", `restored custom alignment (got "${da.getElementById("customAlignment").value}")`);
     ok(/\[64, 64\]/.test(da.getElementById("summary").textContent), "restored custom alignment affects layout");
+
+    // elcores=0 / cube3d=0 restore off; omit restores on (default).
+    // Use a small RM shape when heavy views are on so jsdom stays fast.
+    const joff = boot("https://x/tensor.html#shape=8x8,layout=ROW_MAJOR,sharding=block,grid=2x2,elcores=0,cube3d=0,show=element,color=core");
+    const doff = joff.window.document;
+    ok(doff.getElementById("showElementCores").checked === false, "hash elcores=0 unchecks Show elements → cores");
+    ok(doff.getElementById("elementCoresSection").style.display === "none", "hash elcores=0 hides Result section");
+    ok(doff.getElementById("cube3d").checked === false, "hash cube3d=0 unchecks 3D cube");
+
+    const jon = boot("https://x/tensor.html#shape=8x8,layout=ROW_MAJOR,sharding=block,grid=2x2,show=element,color=core");
+    const don = jon.window.document;
+    ok(don.getElementById("showElementCores").checked === true, "hash without elcores keeps Show elements → cores on");
+    ok(don.getElementById("cube3d").checked === true, "hash without cube3d keeps 3D cube on");
+    ok(don.getElementById("elementCoresSection").style.display !== "none", "hash without elcores shows Result section");
+    ok(don.querySelectorAll("#elementCoresView .bank").length === 4, "restored Result section has 4 core cards");
+
+    // unchecking writes elcores=0 / cube3d=0 into the hash
+    const jw2 = boot("https://x/tensor.html#shape=8x8,layout=ROW_MAJOR,sharding=block,grid=2x2,show=element,color=core");
+    const dw2 = jw2.window.document;
+    const t2 = dw2.getElementById("showElementCores");
+    t2.checked = false;
+    t2.dispatchEvent(new jw2.window.Event("change", { bubbles: true }));
+    ok(/elcores=0/.test(jw2.window.location.hash), `uncheck encodes elcores=0 (got "${jw2.window.location.hash}")`);
+    const c2 = dw2.getElementById("cube3d");
+    c2.checked = false;
+    c2.dispatchEvent(new jw2.window.Event("change", { bubbles: true }));
+    ok(/cube3d=0/.test(jw2.window.location.hash), `uncheck encodes cube3d=0 (got "${jw2.window.location.hash}")`);
 }
 
 console.log(failed === 0 ? "\nTensor UI smoke test: all checks passed" : `\nTensor UI smoke test: ${failed} failed`);
