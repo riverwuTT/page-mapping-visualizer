@@ -211,9 +211,13 @@
 
     // A "layout" bundles dtype + page config + memory config + the resolved
     // alignment (TensorLayout). The memory config carries the sharding intent.
-    function makeLayout(dtype, pc, mem) {
-        const alignment = initializeAlignment([], createDefaultAlignment(pc, dtype, mem));
-        return { dtype, pc, mem, alignment };
+    // `userAlignment` is the optional Alignment{} arg to the TensorLayout ctor —
+    // empty means fall back to create_default_alignment; otherwise it is merged
+    // via initialize_alignment (each dim rounded up to the default's).
+    function makeLayout(dtype, pc, mem, userAlignment) {
+        const user = userAlignment && userAlignment.length ? userAlignment.slice() : [];
+        const alignment = initializeAlignment(user, createDefaultAlignment(pc, dtype, mem));
+        return { dtype, pc, mem, alignment, userAlignment: user };
     }
 
     // A spec is logical_shape + layout, with cached padded / logical-2d / physical
@@ -371,7 +375,12 @@
             ndShardSpec: nd,
             createdWithNd: true,
         };
-        const layout = makeLayout(dtype, pc, mem);
+        // C++ TensorSpec::sharded rebuilds with Alignment{} (drops a prior custom
+        // Alignment). The visualizer's Advanced → Custom alignment models the
+        // TensorLayout 4th ctor arg on the *final* layout instead — same as
+        // constructing TensorLayout(dtype, page_config, sharded_mem, alignment)
+        // directly — so we forward the caller's Alignment through the rebuild.
+        const layout = makeLayout(dtype, pc, mem, baseSpec.layout.userAlignment);
         return makeSpec(baseSpec.logicalShape, layout);
     }
 
@@ -539,12 +548,15 @@
     //   ndStrategy: "round_robin"|"grid_2d",   // for "nd"
     //   ndAlignment: "NONE"|"REQUIRED"|"RECOMMENDED", // for "nd" (default RECOMMENDED)
     //   bankGrid: { x, y },          // for interleave (where pages round-robin)
+    //   alignment: [..],             // optional custom TensorLayout Alignment
+    //                                // (empty/omit → create_default_alignment)
     // }
     function computeTensorMapping(cfg) {
         const dtype = cfg.dtype || "BFLOAT16";
         const layoutName = cfg.layout === "ROW_MAJOR" ? "ROW_MAJOR" : "TILE";
         const pc = pageConfig(layoutName, cfg.tile);
         const orientation = cfg.orientation || "row_major";
+        const userAlignment = cfg.alignment && cfg.alignment.length ? cfg.alignment : [];
 
         // Base (interleaved) spec — convenience constructors shard relative to it.
         const baseMem = {
@@ -554,7 +566,7 @@
             ndShardSpec: null,
             createdWithNd: false,
         };
-        const baseSpec = makeSpec(cfg.logicalShape, makeLayout(dtype, pc, baseMem));
+        const baseSpec = makeSpec(cfg.logicalShape, makeLayout(dtype, pc, baseMem, userAlignment));
 
         let spec;
         if (cfg.sharding === "interleave") {

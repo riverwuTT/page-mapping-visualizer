@@ -272,6 +272,25 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 .topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
 .topnav a:hover { color: var(--text); border-color: var(--border); }
 .topnav a.active { color: var(--accent); border-color: var(--accent); }
+
+/* collapsible advanced options (tensor controls) */
+.advanced {
+    margin-top: 18px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+.advanced > summary {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 6px;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before {
+    content: "▸"; color: var(--accent); font-size: 10px; transition: transform .12s;
+}
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced > summary:hover { color: var(--text); }
+.advanced .field { margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -382,6 +401,15 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
                     <option value="col_major">col_major</option>
                 </select>
             </div>
+
+            <details class="advanced">
+                <summary>Advanced</summary>
+                <div class="field">
+                    <label>Custom alignment</label>
+                    <input type="text" id="customAlignment" value="" placeholder="default" />
+                    <div class="hint">Optional <code>Alignment</code> arg to <code>TensorLayout(dtype, page_config, memory_config, alignment = {})</code>. Blank = <code>create_default_alignment</code>; otherwise merged by <code>initialize_alignment</code> (each dim rounded up to the default).</div>
+                </div>
+            </details>
         </div>
 
         <div id="results">
@@ -1197,9 +1225,13 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
     // A "layout" bundles dtype + page config + memory config + the resolved
     // alignment (TensorLayout). The memory config carries the sharding intent.
-    function makeLayout(dtype, pc, mem) {
-        const alignment = initializeAlignment([], createDefaultAlignment(pc, dtype, mem));
-        return { dtype, pc, mem, alignment };
+    // `userAlignment` is the optional Alignment{} arg to the TensorLayout ctor —
+    // empty means fall back to create_default_alignment; otherwise it is merged
+    // via initialize_alignment (each dim rounded up to the default's).
+    function makeLayout(dtype, pc, mem, userAlignment) {
+        const user = userAlignment && userAlignment.length ? userAlignment.slice() : [];
+        const alignment = initializeAlignment(user, createDefaultAlignment(pc, dtype, mem));
+        return { dtype, pc, mem, alignment, userAlignment: user };
     }
 
     // A spec is logical_shape + layout, with cached padded / logical-2d / physical
@@ -1357,7 +1389,12 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             ndShardSpec: nd,
             createdWithNd: true,
         };
-        const layout = makeLayout(dtype, pc, mem);
+        // C++ TensorSpec::sharded rebuilds with Alignment{} (drops a prior custom
+        // Alignment). The visualizer's Advanced → Custom alignment models the
+        // TensorLayout 4th ctor arg on the *final* layout instead — same as
+        // constructing TensorLayout(dtype, page_config, sharded_mem, alignment)
+        // directly — so we forward the caller's Alignment through the rebuild.
+        const layout = makeLayout(dtype, pc, mem, baseSpec.layout.userAlignment);
         return makeSpec(baseSpec.logicalShape, layout);
     }
 
@@ -1525,12 +1562,15 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
     //   ndStrategy: "round_robin"|"grid_2d",   // for "nd"
     //   ndAlignment: "NONE"|"REQUIRED"|"RECOMMENDED", // for "nd" (default RECOMMENDED)
     //   bankGrid: { x, y },          // for interleave (where pages round-robin)
+    //   alignment: [..],             // optional custom TensorLayout Alignment
+    //                                // (empty/omit → create_default_alignment)
     // }
     function computeTensorMapping(cfg) {
         const dtype = cfg.dtype || "BFLOAT16";
         const layoutName = cfg.layout === "ROW_MAJOR" ? "ROW_MAJOR" : "TILE";
         const pc = pageConfig(layoutName, cfg.tile);
         const orientation = cfg.orientation || "row_major";
+        const userAlignment = cfg.alignment && cfg.alignment.length ? cfg.alignment : [];
 
         // Base (interleaved) spec — convenience constructors shard relative to it.
         const baseMem = {
@@ -1540,7 +1580,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             ndShardSpec: null,
             createdWithNd: false,
         };
-        const baseSpec = makeSpec(cfg.logicalShape, makeLayout(dtype, pc, baseMem));
+        const baseSpec = makeSpec(cfg.logicalShape, makeLayout(dtype, pc, baseMem, userAlignment));
 
         let spec;
         if (cfg.sharding === "interleave") {
@@ -1697,6 +1737,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         bankField: el("bankField"),
         bankX: el("bankX"),
         bankY: el("bankY"),
+        customAlignment: el("customAlignment"),
         colorMode: el("colorMode"),
         granularity: el("granularity"),
         granHeading: el("granHeading"),
@@ -1871,6 +1912,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
             p.push("ndalign=" + dom.ndAlignment.value);
         }
         p.push("orient=" + dom.orientation.value);
+        if (dom.customAlignment.value.trim()) p.push("align=" + shapeEnc(dom.customAlignment.value));
         p.push("show=" + dom.granularity.value);
         p.push("color=" + dom.colorMode.value);
         return p.join(",");
@@ -1928,6 +1970,10 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
         setV(dom.ndStrategy, obj.ndstrat);
         setV(dom.ndAlignment, obj.ndalign);
         setV(dom.orientation, obj.orient);
+        // Custom alignment is optional — clear first so a link without `align=`
+        // does not inherit a stale value from a previous config.
+        dom.customAlignment.value = "";
+        setV(dom.customAlignment, obj.align && shapeDec(obj.align));
         setV(dom.granularity, obj.show);
         setV(dom.colorMode, obj.color);
     }
@@ -2006,6 +2052,9 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
                 cfg.ndShardShape = parseShape(dom.ndShardShape.value);
                 cfg.ndStrategy = dom.ndStrategy.value;
                 cfg.ndAlignment = dom.ndAlignment.value;
+            }
+            if (dom.customAlignment.value.trim()) {
+                cfg.alignment = parseShape(dom.customAlignment.value);
             }
             res = TM.computeTensorMapping(cfg);
         } catch (e) {
@@ -2450,7 +2499,7 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 
     // ---- init ----
     buildPresets();
-    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape, dom.shardH, dom.shardW].forEach((i) =>
+    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape, dom.shardH, dom.shardW, dom.customAlignment].forEach((i) =>
         i.addEventListener("input", render)
     );
     [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode, dom.granularity].forEach((i) =>

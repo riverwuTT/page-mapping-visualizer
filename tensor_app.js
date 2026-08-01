@@ -51,6 +51,7 @@
         bankField: el("bankField"),
         bankX: el("bankX"),
         bankY: el("bankY"),
+        customAlignment: el("customAlignment"),
         colorMode: el("colorMode"),
         granularity: el("granularity"),
         granHeading: el("granHeading"),
@@ -225,6 +226,7 @@
             p.push("ndalign=" + dom.ndAlignment.value);
         }
         p.push("orient=" + dom.orientation.value);
+        if (dom.customAlignment.value.trim()) p.push("align=" + shapeEnc(dom.customAlignment.value));
         p.push("show=" + dom.granularity.value);
         p.push("color=" + dom.colorMode.value);
         return p.join(",");
@@ -282,6 +284,10 @@
         setV(dom.ndStrategy, obj.ndstrat);
         setV(dom.ndAlignment, obj.ndalign);
         setV(dom.orientation, obj.orient);
+        // Custom alignment is optional — clear first so a link without `align=`
+        // does not inherit a stale value from a previous config.
+        dom.customAlignment.value = "";
+        setV(dom.customAlignment, obj.align && shapeDec(obj.align));
         setV(dom.granularity, obj.show);
         setV(dom.colorMode, obj.color);
     }
@@ -360,6 +366,9 @@
                 cfg.ndShardShape = parseShape(dom.ndShardShape.value);
                 cfg.ndStrategy = dom.ndStrategy.value;
                 cfg.ndAlignment = dom.ndAlignment.value;
+            }
+            if (dom.customAlignment.value.trim()) {
+                cfg.alignment = parseShape(dom.customAlignment.value);
             }
             res = TM.computeTensorMapping(cfg);
         } catch (e) {
@@ -804,7 +813,7 @@
 
     // ---- init ----
     buildPresets();
-    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape, dom.shardH, dom.shardW].forEach((i) =>
+    [dom.logicalShape, dom.tile, dom.gridX, dom.gridY, dom.bankX, dom.bankY, dom.ndShardShape, dom.shardH, dom.shardW, dom.customAlignment].forEach((i) =>
         i.addEventListener("input", render)
     );
     [dom.layout, dom.dtype, dom.sharding, dom.orientation, dom.ndStrategy, dom.ndAlignment, dom.colorMode, dom.granularity].forEach((i) =>

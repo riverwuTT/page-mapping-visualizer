@@ -254,6 +254,24 @@ click(document.querySelector("#selbar button"));
 drive({ logicalShape: "64,64", layout: "TILE", sharding: "nd", ndShardShape: "1,1,32,32", gridX: 2, gridY: 2 });
 ok(errText().length > 0, "rank-mismatch ND surfaces an error");
 
+// ---- Advanced → Custom alignment ------------------------------------------
+{
+    ok(document.querySelector("details.advanced"), "Advanced options <details> present");
+    ok(document.getElementById("customAlignment"), "Custom alignment input present");
+    // blank = default tile alignment [32,32] for a 30×30 TILE tensor
+    drive({ logicalShape: "30,30", layout: "TILE", sharding: "interleave", bankX: 4, bankY: 1 });
+    set("customAlignment", "");
+    ok(errText() === "", `default alignment no error (got "${errText()}")`);
+    ok(/\[32, 32\]/.test(document.getElementById("summary").textContent), "default TILE alignment shown in summary");
+    // custom [64,64] pads physical / padded shape
+    set("customAlignment", "64,64");
+    ok(errText() === "", `custom alignment no error (got "${errText()}")`);
+    const sum = document.getElementById("summary").textContent;
+    ok(/\[64, 64\]/.test(sum), "custom alignment shown in summary");
+    ok(/64 × 64/.test(sum), "custom alignment pads physical shape");
+    set("customAlignment", ""); // restore for later tests
+}
+
 // ---- shareable link: config <-> URL hash round-trip ------------------------
 // Uses fresh documents booted at a real URL (the shared jsdom above is about:blank,
 // where history.replaceState is a no-op).
@@ -301,6 +319,12 @@ ok(errText().length > 0, "rank-mismatch ND surfaces an error");
     const dc = jc.window.document;
     ok(dc.getElementById("shardW").value === "32", `restored explicit shard width (got "${dc.getElementById("shardW").value}")`);
     ok(dc.querySelectorAll("#shardsView .shard-card").length === 3, "restored classic shard renders 3 shards");
+
+    // custom alignment round-trips through the hash
+    const ja = boot("https://x/tensor.html#shape=30x30,layout=TILE,sharding=interleave,banks=4x1,align=64x64,show=element,color=core");
+    const da = ja.window.document;
+    ok(da.getElementById("customAlignment").value === "64,64", `restored custom alignment (got "${da.getElementById("customAlignment").value}")`);
+    ok(/\[64, 64\]/.test(da.getElementById("summary").textContent), "restored custom alignment affects layout");
 }
 
 console.log(failed === 0 ? "\nTensor UI smoke test: all checks passed" : `\nTensor UI smoke test: ${failed} failed`);

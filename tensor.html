@@ -117,6 +117,15 @@
                     <option value="col_major">col_major</option>
                 </select>
             </div>
+
+            <details class="advanced">
+                <summary>Advanced</summary>
+                <div class="field">
+                    <label>Custom alignment</label>
+                    <input type="text" id="customAlignment" value="" placeholder="default" />
+                    <div class="hint">Optional <code>Alignment</code> arg to <code>TensorLayout(dtype, page_config, memory_config, alignment = {})</code>. Blank = <code>create_default_alignment</code>; otherwise merged by <code>initialize_alignment</code> (each dim rounded up to the default).</div>
+                </div>
+            </details>
         </div>
 
         <div id="results">

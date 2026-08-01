@@ -272,6 +272,25 @@ h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; 
 .topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
 .topnav a:hover { color: var(--text); border-color: var(--border); }
 .topnav a.active { color: var(--accent); border-color: var(--accent); }
+
+/* collapsible advanced options (tensor controls) */
+.advanced {
+    margin-top: 18px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+.advanced > summary {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 6px;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before {
+    content: "▸"; color: var(--accent); font-size: 10px; transition: transform .12s;
+}
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced > summary:hover { color: var(--text); }
+.advanced .field { margin-top: 12px; }
 </style>
 </head>
 <body>

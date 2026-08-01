@@ -134,6 +134,43 @@ eq(T.recommendedShardAlignment(T.pageConfig("ROW_MAJOR"), "FLOAT32"), [16], "rm 
     eq(r.mapping.numBanks, 4, "E 4 cores");
 }
 
+// ---- custom Alignment (TensorLayout 4th ctor arg) ---------------------------
+// Empty Alignment{} → create_default_alignment. Non-empty is merged via
+// initialize_alignment (each user dim rounded up to the layout default).
+{
+    eq(T.initializeAlignment([], [32, 32]), [32, 32], "init align: empty → default");
+    eq(T.initializeAlignment([64, 64], [32, 32]), [64, 64], "init align: larger user wins");
+    eq(T.initializeAlignment([16, 16], [32, 32]), [32, 32], "init align: user rounded up to default");
+    eq(T.initializeAlignment([8], [32, 32]), [32, 32], "init align: shorter user right-aligned");
+
+    // TILE + custom [64,64]: physical pads beyond the tile default.
+    const t = T.computeTensorMapping({
+        logicalShape: [30, 30], layout: "TILE", sharding: "interleave",
+        bankGrid: { x: 4, y: 1 }, alignment: [64, 64],
+    });
+    eq(t.alignment, [64, 64], "custom TILE alignment stored");
+    eq(t.physical, [64, 64], "custom TILE alignment pads physical");
+    eq(t.paddedShape, [64, 64], "custom TILE alignment pads padded_shape");
+
+    // Same custom alignment under block sharding (visualizer applies it to the
+    // final TensorLayout, not the C++ .sharded() path which would drop it).
+    const b = T.computeTensorMapping({
+        logicalShape: [30, 30], layout: "TILE", sharding: "block",
+        grid: { x: 2, y: 2 }, alignment: [64, 64],
+    });
+    eq(b.alignment, [64, 64], "custom TILE alignment survives sharding rebuild");
+    eq(b.physical, [64, 64], "custom TILE alignment pads physical when sharded");
+
+    // ROW_MAJOR interleaved: default align is [1], so custom [8] sticks.
+    const r = T.computeTensorMapping({
+        logicalShape: [6, 5], layout: "ROW_MAJOR", sharding: "interleave",
+        bankGrid: { x: 2, y: 1 }, alignment: [8],
+    });
+    eq(r.alignment, [8], "custom RM interleaved alignment");
+    eq(r.physical, [6, 8], "custom RM width pad");
+    eq(r.paddedShape, [6, 8], "custom RM padded_shape");
+}
+
 // ---- invariants across a sweep ----------------------------------------------
 const SWEEP = [
     { logicalShape: [96, 96], layout: "TILE", sharding: "interleave", bankGrid: { x: 3, y: 1 } },
