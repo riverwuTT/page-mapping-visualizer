@@ -78,11 +78,15 @@
 
     // create_default_alignment: the alignment a layout imposes by default. This is
     // what initialize_alignment() falls back to when no explicit alignment is set.
+    //   TILE      → tile [H, W]
+    //   ROW_MAJOR → width of the row (= page width): shard_spec.shape[1] /
+    //               nd_shard_spec.shard_shape[-1] when sharded; {1} when interleaved
+    //               (page is still a full physical row via get_page_shape).
     function createDefaultAlignment(pc, dtype, mem) {
         if (pc.layout === "TILE") {
             return [pc.tile[0], pc.tile[1]];
         }
-        // ROW_MAJOR
+        // ROW_MAJOR — sharded default is the row/page width (shard width).
         if (mem.shardSpec) return [mem.shardSpec.shape[1]];
         if (mem.ndShardSpec) return [at(mem.ndShardSpec.shardShape, -1)];
         return [1];
@@ -616,8 +620,8 @@
         if (cfg.sharding === "interleave") {
             spec = baseSpec;
         } else if (cfg.sharding === "height") {
-            // height sharding is always the even auto-split (no custom shard height)
-            spec = heightSharded(baseSpec, cfg.grid, orientation);
+            // omit/0 → even auto-split (1 shard/core); else honor explicit shard height
+            spec = heightSharded(baseSpec, cfg.grid, orientation, cfg.shardHeight);
         } else if (cfg.sharding === "width") {
             spec = widthSharded(baseSpec, cfg.grid, orientation, cfg.shardWidth);
         } else if (cfg.sharding === "block") {
@@ -638,19 +642,27 @@
         const em = elementToPage(bufArgs.physical, bufArgs.pageShape, spec.logicalShape, spec.paddedShape);
 
         // Delegate page → core to the buffer-level model (page_mapping.js).
+        // Classic height/width/block slice the *folded physical 2D* page grid
+        // (compute_physical_shape → tensor2dInPages) — same as the visualizer's
+        // flatten step. Using N-D padded pages here lets squeeze_shape_ranks
+        // collapse GRID_2D down to rank-1 and throw "needs a rank-2 page/shard
+        // shape" even though the tensor was already flattened to 2D.
+        // True ND sharding keeps the N-D page grid (tensorShapeInPages).
         let mapping;
         if (!bufArgs.sharded) {
             const bankGrid = cfg.bankGrid || cfg.grid || { x: gridDefaultBanks(bufArgs), y: 1 };
             mapping = PM.computeMapping({
-                pageGrid: bufArgs.tensorShapeInPages,
+                pageGrid: bufArgs.tensor2dInPages,
                 shardShape: [1],
                 bankGrid,
                 distribution: "interleaved",
                 orientation,
             });
         } else {
+            const classic2d =
+                cfg.sharding === "height" || cfg.sharding === "width" || cfg.sharding === "block";
             mapping = PM.computeMapping({
-                pageGrid: bufArgs.tensorShapeInPages,
+                pageGrid: classic2d ? bufArgs.tensor2dInPages : bufArgs.tensorShapeInPages,
                 shardShape: bufArgs.shardShapeInPages,
                 bankGrid: { x: cfg.grid.x, y: cfg.grid.y },
                 distribution: bufArgs.distribution, // "round_robin" | "grid_2d"

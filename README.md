@@ -12,9 +12,11 @@ visualizers and an overview landing page:
 - **Buffer page-mapping** (`buffer.html`) — the lower **page → core** layer:
   given a list of *pages*, which bank/core does each land in and at what shard
   offset? Ported from [`buffer.hpp`](../tt_metal/api/tt-metalium/buffer.hpp).
-- **Animated mappings** (`animated.html`) — a step-through of **interleaved**
-  mapping: configure tensor size, `ROW_MAJOR` / `TILE` page layout, tile size,
-  and core count, then watch pages get sliced and dealt round-robin onto cores.
+- **Animated mappings** — step-through walkthroughs per distribution style:
+  - **Interleaved** (`animated.html`) — pages dealt round-robin onto cores
+    (`ROW_MAJOR` / `TILE`).
+  - **2D sharding** (`shard_2d_anim.html`) — classic height / width / block:
+    align → flatten → slice → shards→cores.
 
 The tensor model sits on top of the buffer model: it adds the element-shape ÷
 layout step (`compute_physical_shape` → `get_page_shape`) the buffer model
@@ -28,7 +30,8 @@ is fully self-contained (no network, no server):
 
 - **`tensor_mapping_viz.html`** — the tensor visualizer.
 - **`page_mapping_viz.html`** — the buffer visualizer.
-- **`animated.html`** — the animated interleaved mapping walkthrough.
+- **`animated.html`** — interleaved animated mapping walkthrough.
+- **`shard_2d_anim.html`** — 2D sharding animated walkthrough.
 
 ## Deploy (GitHub Pages)
 
@@ -50,7 +53,8 @@ plan the repo must be public).
 | `page_mapping.js`       | Buffer algorithm: page → shard → bank. node (`require`) + browser (`window.PageMapping`). |
 | `app.js`                | Buffer visualizer UI. |
 | `buffer.html`           | Buffer dev shell. |
-| `animated.html`         | Animated interleaved mapping walkthrough (self-contained). |
+| `animated.html`         | Interleaved animated mapping walkthrough (self-contained). |
+| `shard_2d_anim.html`    | 2D sharding animated walkthrough (self-contained). |
 | `index.html`            | Overview landing page (self-contained). |
 | `style.css`             | Shared styling. |
 | `build.js`              | Inlines css/js into the dev shells → `tensor_mapping_viz.html` + `page_mapping_viz.html`. |

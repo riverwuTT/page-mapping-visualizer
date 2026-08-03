@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Animated mappings: step through interleaved page → core deal-out. -->
+<!-- Interleaved animated mapping: step through page → core deal-out. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>tt-metal animated mappings</title>
+    <title>tt-metal interleaved mapping</title>
     <style>
         :root {
             --bg: #0f1419;
@@ -39,41 +39,60 @@
         .topnav a:hover { color: var(--text); border-color: var(--border); }
         .topnav a.active { color: var(--accent); border-color: var(--accent); }
 
-        .controls {
-            display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end;
-            padding: 12px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+        /* Left config sidebar — same pattern as tensor.html / shard_2d_anim.html */
+        .layout { display: flex; gap: 0; align-items: stretch; min-height: calc(100vh - 64px); }
+        #controls {
+            flex: 0 0 290px;
+            padding: 18px;
+            border-right: 1px solid var(--border);
+            background: var(--panel);
+            overflow-y: auto;
         }
-        .controls .field { display: flex; flex-direction: column; gap: 4px; }
-        .controls label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-        .controls input, .controls select {
-            width: 72px; padding: 6px 8px;
+        #main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+        #controls .field { margin-bottom: 14px; }
+        #controls .field label {
+            display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px;
+        }
+        #controls .field input, #controls .field select {
+            width: 100%; padding: 7px 9px;
             background: var(--panel2); border: 1px solid var(--border);
-            border-radius: 6px; color: var(--text); font: inherit; font-size: 13px;
+            border-radius: 6px; color: var(--text); font: inherit;
         }
-        .controls select { width: 130px; }
-        .controls input:focus, .controls select:focus { outline: none; border-color: var(--accent); }
-        .controls .row2 { display: flex; gap: 6px; align-items: center; }
-        .controls .row2 span { color: var(--muted); font-size: 12px; }
-        .controls .field.tile-only.disabled { opacity: .35; pointer-events: none; }
-        .controls .apply {
-            font: inherit; font-size: 13px; padding: 7px 14px;
+        #controls .field input:focus, #controls .field select:focus {
+            outline: none; border-color: var(--accent);
+        }
+        #controls .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+        #controls .field.tile-only.disabled { opacity: .35; pointer-events: none; }
+        #controls .grp {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+            margin: 20px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+        }
+        #controls .grp:first-child { margin-top: 0; }
+        #controls .row2 { display: flex; gap: 10px; align-items: center; }
+        #controls .row2 span { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+        #controls .row2 input { width: 100%; }
+        #controls .apply {
+            width: 100%; font: inherit; font-size: 13px; padding: 8px 14px; margin-top: 6px;
             background: #1a3a5c; border: 1px solid var(--accent);
             border-radius: 6px; color: #cfe6ff; cursor: pointer;
         }
-        .controls .apply:hover { filter: brightness(1.08); }
-        .controls .presets { display: flex; gap: 6px; flex-wrap: wrap; }
-        .controls .presets button {
-            font: inherit; font-size: 11px; padding: 6px 10px;
+        #controls .apply:hover { filter: brightness(1.08); }
+        #controls .preset-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        #controls .preset-btns button {
+            font: inherit; font-size: 11px; padding: 4px 8px;
             background: var(--panel2); border: 1px solid var(--border);
             border-radius: 5px; color: var(--text); cursor: pointer;
         }
-        .controls .presets button:hover { border-color: var(--accent); }
+        #controls .preset-btns button:hover { border-color: var(--accent); }
         #cfgError {
-            flex: 1 1 100%;
             background: #3a1d1d; border: 1px solid #7a3030; color: #ffb4b4;
-            padding: 8px 12px; border-radius: 6px; font-size: 12.5px;
+            padding: 8px 12px; border-radius: 6px; font-size: 12.5px; margin-top: 10px;
         }
         #cfgError:empty { display: none; }
+        @media (max-width: 800px) {
+            .layout { flex-direction: column; }
+            #controls { flex: none; border-right: none; border-bottom: 1px solid var(--border); }
+        }
 
         .toolbar {
             display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
@@ -105,11 +124,9 @@
             grid-template-columns: 1fr 1fr;
             gap: 28px;
             padding: 28px 22px 48px;
-            max-width: 1200px;
-            margin: 0 auto;
-            min-height: calc(100vh - 200px);
+            flex: 1 1 auto;
         }
-        @media (max-width: 720px) {
+        @media (max-width: 1100px) {
             .stage { grid-template-columns: 1fr; }
         }
 
@@ -277,7 +294,7 @@
 </head>
 <body>
     <header>
-        <h1>tt-metal animated mappings</h1>
+        <h1>tt-metal interleaved mapping</h1>
         <p>
             Step through how an interleaved tensor is sliced into pages and dealt
             round-robin onto cores. Configure tensor size, page layout
@@ -287,69 +304,84 @@
             <a href="index.html">Overview</a>
             <a href="buffer.html">Buffer page-mapping</a>
             <a href="tensor.html">Tensor sharding</a>
-            <a href="animated.html" class="active">Animated mappings</a>
+            <a href="animated.html" class="active">Interleaved</a>
+            <a href="shard_2d_anim.html">2D sharding</a>
         </nav>
     </header>
 
-    <div class="controls">
-        <div class="field">
-            <label>Tensor size</label>
-            <div class="row2">
-                <input id="inRows" type="number" min="1" max="32" value="12" title="rows" />
-                <span>×</span>
-                <input id="inCols" type="number" min="1" max="16" value="4" title="cols" />
+    <div class="layout">
+        <div id="controls">
+            <div class="grp">Presets</div>
+            <div class="field">
+                <div class="preset-btns" id="presets">
+                    <button type="button" data-preset="tile">12×4 / 4×4 TILE</button>
+                    <button type="button" data-preset="rm">8×3 ROW_MAJOR</button>
+                </div>
+            </div>
+
+            <div class="grp">Tensor</div>
+            <div class="field">
+                <label>Tensor size</label>
+                <div class="row2">
+                    <input id="inRows" type="number" min="1" max="32" value="12" title="rows" />
+                    <span>×</span>
+                    <input id="inCols" type="number" min="1" max="16" value="4" title="cols" />
+                </div>
+                <div class="hint">Rows × cols (elements)</div>
+            </div>
+            <div class="field">
+                <label>Page layout</label>
+                <select id="inLayout">
+                    <option value="TILE" selected>TILE</option>
+                    <option value="ROW_MAJOR">ROW_MAJOR</option>
+                </select>
+            </div>
+            <div class="field tile-only" id="tileField">
+                <label>Tile size</label>
+                <div class="row2">
+                    <input id="inTileH" type="number" min="1" max="16" value="4" title="tile rows" />
+                    <span>×</span>
+                    <input id="inTileW" type="number" min="1" max="16" value="4" title="tile cols" />
+                </div>
+            </div>
+
+            <div class="grp">Cores</div>
+            <div class="field">
+                <label>Core count</label>
+                <input id="inCores" type="number" min="1" max="16" value="4" />
+                <div class="hint">Pages deal round-robin across this many cores</div>
+            </div>
+
+            <button class="apply" id="btnApply">Apply</button>
+            <div id="cfgError"></div>
+        </div>
+
+        <div id="main">
+            <div class="toolbar">
+                <button id="btnReset">Reset</button>
+                <button id="btnPrev">← Prev</button>
+                <button id="btnNext" class="primary">Next →</button>
+                <button id="btnPlay">Play</button>
+                <span class="state-label">State <strong id="stateNum">1</strong> / 4 — <span id="stateName">whole tensor</span></span>
+                <div class="dots" id="dots" aria-hidden="true">
+                    <span class="on"></span><span></span><span></span><span></span>
+                </div>
+            </div>
+
+            <div class="stage">
+                <div class="pane">
+                    <h2>Tensor</h2>
+                    <p class="sub" id="tensorSub"></p>
+                    <div class="tensor-stack" id="tensorStack"></div>
+                </div>
+                <div class="pane">
+                    <h2>Cores</h2>
+                    <p class="sub" id="coresSub"></p>
+                    <div class="cores" id="cores"></div>
+                </div>
+                <div class="caption" id="caption"></div>
             </div>
         </div>
-        <div class="field">
-            <label>Page layout</label>
-            <select id="inLayout">
-                <option value="TILE" selected>TILE</option>
-                <option value="ROW_MAJOR">ROW_MAJOR</option>
-            </select>
-        </div>
-        <div class="field tile-only" id="tileField">
-            <label>Tile size</label>
-            <div class="row2">
-                <input id="inTileH" type="number" min="1" max="16" value="4" title="tile rows" />
-                <span>×</span>
-                <input id="inTileW" type="number" min="1" max="16" value="4" title="tile cols" />
-            </div>
-        </div>
-        <div class="field">
-            <label>Cores</label>
-            <input id="inCores" type="number" min="1" max="16" value="4" />
-        </div>
-        <button class="apply" id="btnApply">Apply</button>
-        <div class="presets">
-            <button type="button" data-preset="tile">12×4 / 4×4 TILE</button>
-            <button type="button" data-preset="rm">8×3 ROW_MAJOR</button>
-        </div>
-        <div id="cfgError"></div>
-    </div>
-
-    <div class="toolbar">
-        <button id="btnReset">Reset</button>
-        <button id="btnPrev">← Prev</button>
-        <button id="btnNext" class="primary">Next →</button>
-        <button id="btnPlay">Play</button>
-        <span class="state-label">State <strong id="stateNum">1</strong> / 4 — <span id="stateName">whole tensor</span></span>
-        <div class="dots" id="dots" aria-hidden="true">
-            <span class="on"></span><span></span><span></span><span></span>
-        </div>
-    </div>
-
-    <div class="stage">
-        <div class="pane">
-            <h2>Tensor</h2>
-            <p class="sub" id="tensorSub"></p>
-            <div class="tensor-stack" id="tensorStack"></div>
-        </div>
-        <div class="pane">
-            <h2>Cores</h2>
-            <p class="sub" id="coresSub"></p>
-            <div class="cores" id="cores"></div>
-        </div>
-        <div class="caption" id="caption"></div>
     </div>
 
     <script>
@@ -868,7 +900,7 @@
         b.onclick = () => setPreset(b.dataset.preset);
     });
     // Enter in inputs applies
-    document.querySelectorAll(".controls input, .controls select").forEach((el) => {
+    document.querySelectorAll("#controls input, #controls select").forEach((el) => {
         el.addEventListener("keydown", (e) => {
             if (e.key === "Enter") applyConfig();
         });

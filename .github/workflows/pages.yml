@@ -39,6 +39,9 @@ jobs:
           cp page_mapping_viz.html _site/buffer.html
           cp tensor_mapping_viz.html _site/tensor.html
           cp animated.html _site/animated.html
+          cp shard_2d_anim.html _site/shard_2d_anim.html
+          cp page_mapping.js _site/page_mapping.js
+          cp tensor_mapping.js _site/tensor_mapping.js
 
       - uses: actions/upload-pages-artifact@v3
         with:

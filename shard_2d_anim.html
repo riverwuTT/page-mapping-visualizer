@@ -1,0 +1,2587 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  Classic 2D sharding walkthrough (HEIGHT / WIDTH / BLOCK).
+
+  Pipeline matches TensorSpec + TensorLayout (+ Buffer shard→core):
+    1. logical → padded     compute_padded_shape (Alignment)
+    2. padded ND → 2D       compute_physical_shape / fold leading dims into H
+    3. slice 2D → shards    TensorSpec::{height,width,block}_sharded
+    4. shards → cores       BufferDistributionSpec (round_robin | grid_2d)
+
+  Numbers come from tensor_mapping.js (same model as tensor.html).
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2D sharding — pad → flatten → slice → cores</title>
+    <style>
+        :root {
+            --bg: #0f1419;
+            --panel: #161b22;
+            --panel2: #1c2330;
+            --border: #2a3340;
+            --text: #d7dee8;
+            --muted: #8b97a7;
+            --accent: #4ea1ff;
+            --pad: #2a3140;
+            --cell-w: 28px;
+            --cell-h: 22px;
+            color-scheme: dark;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        header {
+            padding: 16px 22px;
+            border-bottom: 1px solid var(--border);
+            background: var(--panel);
+        }
+        header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+        header p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; max-width: 920px; }
+        header code { color: var(--accent); }
+        .topnav { display: flex; gap: 14px; align-items: center; margin-top: 8px; font-size: 12.5px; flex-wrap: wrap; }
+        .topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
+        .topnav a:hover { color: var(--text); border-color: var(--border); }
+        .topnav a.active { color: var(--accent); border-color: var(--accent); }
+
+        /* Left config sidebar — same pattern as tensor.html */
+        .layout { display: flex; gap: 0; align-items: stretch; min-height: calc(100vh - 64px); }
+        #controls {
+            flex: 0 0 290px;
+            padding: 18px;
+            border-right: 1px solid var(--border);
+            background: var(--panel);
+            overflow-y: auto;
+        }
+        #main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+        #controls .field { margin-bottom: 14px; }
+        #controls .field label {
+            display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px;
+            text-transform: none; letter-spacing: 0;
+        }
+        #controls .field input, #controls .field select {
+            width: 100%; padding: 7px 9px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); font: inherit;
+        }
+        #controls .field input:focus, #controls .field select:focus {
+            outline: none; border-color: var(--accent);
+        }
+        #controls .field .hint { font-size: 11px; color: var(--muted); margin-top: 4px; max-width: none; }
+        #controls .field.mode-off { opacity: .4; }
+        #controls .field.mode-off input { pointer-events: none; }
+        #controls .field.mode-on input:disabled { opacity: .55; }
+        #controls .grp {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+            margin: 20px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+        }
+        #controls .grp:first-child { margin-top: 0; }
+        #controls .row2 { display: flex; gap: 10px; align-items: center; }
+        #controls .row2 .field { flex: 1; margin-bottom: 0; }
+        #controls .row2 span { color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+        #controls .row2 input { width: 100%; }
+        #controls .apply {
+            width: 100%; font: inherit; font-size: 13px; padding: 8px 14px; margin-top: 6px;
+            background: #1a3a5c; border: 1px solid var(--accent);
+            border-radius: 6px; color: #cfe6ff; cursor: pointer;
+        }
+        #controls .apply:hover { filter: brightness(1.08); }
+        #controls .preset-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+        #controls .preset-btns button {
+            font: inherit; font-size: 11px; padding: 4px 8px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 5px; color: var(--text); cursor: pointer;
+        }
+        #controls .preset-btns button:hover { border-color: var(--accent); }
+        #controls .toggle {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 12px; color: var(--muted); margin: 4px 0 12px; cursor: pointer;
+        }
+        #cfgError {
+            background: #3a1d1d; border: 1px solid #7a3030; color: #ffb4b4;
+            padding: 8px 12px; border-radius: 6px; font-size: 12.5px; margin-top: 10px;
+        }
+        #cfgError:empty { display: none; }
+        @media (max-width: 800px) {
+            .layout { flex-direction: column; }
+            #controls { flex: none; border-right: none; border-bottom: 1px solid var(--border); }
+        }
+
+        .toolbar {
+            display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+            padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+        }
+        .toolbar button {
+            font: inherit; font-size: 13px; padding: 7px 14px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); cursor: pointer;
+        }
+        .toolbar button:hover { border-color: var(--accent); }
+        .toolbar button.primary {
+            background: #1a3a5c; border-color: var(--accent); color: #cfe6ff;
+        }
+        .toolbar button:disabled { opacity: .4; cursor: default; }
+        .toolbar .state-label { margin-left: 8px; color: var(--muted); font-size: 13px; }
+        .toolbar .state-label strong { color: var(--text); font-weight: 600; }
+        .dots { display: flex; gap: 6px; margin-left: auto; }
+        .dots span {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--border); border: 1px solid var(--border);
+        }
+        .dots span.on { background: var(--accent); border-color: var(--accent); }
+
+        .stage {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 28px;
+            padding: 28px 22px 48px;
+            flex: 1 1 auto;
+        }
+        @media (max-width: 1100px) { .stage { grid-template-columns: 1fr; } }
+
+        .pane h2 {
+            margin: 0 0 6px; font-size: 13px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .pane .sub {
+            margin: 0 0 16px; color: var(--muted); font-size: 12.5px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        /* 3D cube — same model as tensor.html / style.css */
+        .cube-stage {
+            position: relative; height: 420px; perspective: 1100px;
+            background: radial-gradient(ellipse at center, #11161d 0%, #0a0d12 100%);
+            border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+            cursor: grab; touch-action: none; width: min(100%, 560px);
+        }
+        .cube-stage:active { cursor: grabbing; }
+        .cube-stage.small { height: 240px; perspective: 760px; }
+        .cube-scene { position: absolute; top: 50%; left: 50%; transform-style: preserve-3d; }
+        .cube-plane { position: absolute; transform-style: preserve-3d; }
+        .cube-plane .cells {
+            display: grid; gap: 2px;
+            padding: 5px; border-radius: 5px;
+            background: rgba(120, 160, 220, .06); outline: 1px solid rgba(120, 160, 220, .25);
+        }
+        .cube-plane-label {
+            position: absolute; top: -16px; left: 2px;
+            font-size: 11px; color: var(--accent);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .cube-hint {
+            position: absolute; bottom: 8px; right: 12px;
+            font-size: 11px; color: var(--muted); pointer-events: none;
+        }
+        .cube-stage .cell {
+            width: var(--cell-px, 18px); height: var(--cell-px, 18px);
+            font-size: 8px;
+        }
+        .toggle {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 12px; color: var(--muted); margin-left: 8px;
+            text-transform: none; letter-spacing: 0; cursor: pointer;
+        }
+        .toggle input { accent-color: var(--accent); }
+
+        .nd-stack {
+            display: flex; flex-direction: column; gap: 14px;
+            width: max-content;
+        }
+
+        .grid2d {
+            display: grid;
+            gap: 2px;
+            width: max-content;
+            padding: 3px;
+            border-radius: 8px;
+            border: 1px solid transparent;
+            transition: gap .55s ease, padding .55s ease, border-color .55s ease;
+        }
+        .grid2d.sliced {
+            gap: 14px;
+            padding: 0;
+            border-color: transparent;
+        }
+
+        .shard {
+            display: grid;
+            gap: 2px;
+            position: relative;
+            border-radius: 8px;
+            padding: 3px;
+            border: 1px solid transparent;
+            width: max-content;
+            transition: opacity .3s ease, outline-color .15s, filter .2s,
+                border-color .35s ease, background .35s ease, transform .35s ease;
+        }
+        .grid2d.sliced .shard {
+            border-color: color-mix(in srgb, var(--shard-color, var(--accent)) 55%, transparent);
+            background: color-mix(in srgb, var(--shard-color, var(--accent)) 8%, transparent);
+        }
+        .shard.ghost { opacity: .18; filter: grayscale(.6); }
+        /* H along left edge, W along bottom — emphasize shard shape */
+        .shard .shard-dim {
+            position: absolute;
+            font-size: 11px; font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: var(--shard-color, var(--accent));
+            pointer-events: none;
+            opacity: 0; transition: opacity .3s ease;
+            line-height: 1;
+            text-shadow: 0 0 6px rgba(0,0,0,.55);
+        }
+        .shard .shard-dim-h {
+            left: -16px; top: 50%;
+            writing-mode: vertical-rl;
+            transform: translateY(-50%) rotate(180deg);
+            letter-spacing: .04em;
+        }
+        .shard .shard-dim-w {
+            bottom: -15px; left: 50%;
+            transform: translateX(-50%);
+        }
+        .grid2d.sliced .shard.shard-revealed .shard-dim { opacity: 1; }
+        .grid2d:not(.sliced) .shard { padding: 0; border-color: transparent; background: transparent; }
+        .grid2d:not(.sliced) .shard .shard-dim { display: none; }
+        .shard.slice-pending { opacity: .55; filter: grayscale(.35); }
+        .shard.slice-cutting {
+            outline: 2px solid #fff;
+            outline-offset: 3px;
+            filter: brightness(1.35);
+            transform: scale(1.03);
+            z-index: 2;
+        }
+        .shard.shard-revealed {
+            border-color: color-mix(in srgb, var(--shard-color, var(--accent)) 70%, transparent);
+            background: color-mix(in srgb, var(--shard-color, var(--accent)) 12%, transparent);
+        }
+        .slice-status {
+            font-size: 12px; color: var(--muted);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            margin: 0 0 12px;
+        }
+        .slice-status strong { color: var(--accent); font-weight: 600; }
+        .flatten-stage.slice-solo { grid-template-columns: 1fr; }
+        .flatten-col.slice-exit,
+        .flatten-arrow.slice-exit,
+        .dim-arrow.slice-exit {
+            opacity: 0;
+            transform: scale(0.92) translateY(8px);
+            transition: opacity .4s ease, transform .4s ease;
+            pointer-events: none;
+        }
+        .cell.cut-preview {
+            outline: 2px solid var(--shard-color, var(--accent));
+            outline-offset: -1px;
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--shard-color, var(--accent)) 50%, transparent);
+        }
+        .nd-stack.slice-morph-out {
+            opacity: 0;
+            transform: scale(0.985);
+            transition: opacity .28s ease, transform .28s ease;
+        }
+        .nd-stack.slice-morph-in {
+            animation: sliceMorphIn .32s ease;
+        }
+        @keyframes sliceMorphIn {
+            from { opacity: 0; transform: scale(0.985); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .page {
+            display: grid;
+            gap: 2px;
+            padding: 2px;
+            border: 1px dashed transparent;
+            border-radius: 4px;
+        }
+        .show-pages .page { border-color: #3d4a5c; }
+
+        .cell {
+            width: var(--cell-w); height: var(--cell-h);
+            display: flex; align-items: center; justify-content: center;
+            border-radius: 3px;
+            background: var(--panel2);
+            border: 1px solid var(--border);
+            font-size: 9px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            color: var(--muted);
+            transition: background .2s, border-color .2s, color .2s, opacity .2s, transform .12s;
+            user-select: none;
+        }
+        .cell.pad {
+            background: var(--pad);
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,255,255,.05) 0 5px, transparent 5px 10px);
+            border-style: dashed;
+            color: #6a7382;
+        }
+        .cell.real { color: var(--text); }
+        .cell.colored {
+            color: #0f1419;
+            font-weight: 600;
+        }
+
+        /* Step 2: logical vs padded colors + blink on pads */
+        .cell.logical-tone {
+            background: #2a4a6e;
+            border-color: #4ea1ff;
+            color: #cfe6ff;
+        }
+        .cell.pad-tone {
+            background: #5a3a12;
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,200,80,.12) 0 5px, transparent 5px 10px);
+            border-color: #e3a020;
+            border-style: dashed;
+            color: #f0d090;
+        }
+        .cell.pad-blink {
+            animation: padBlink 1s ease-in-out infinite;
+        }
+        @keyframes padBlink {
+            0%, 100% { filter: brightness(1); box-shadow: none; }
+            50% {
+                filter: brightness(1.55);
+                box-shadow: 0 0 0 2px #ffc14a, 0 0 12px rgba(255, 180, 40, .55);
+            }
+        }
+        .swatch-row {
+            display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px;
+            font-size: 12px; color: var(--muted);
+        }
+        .swatch-row .sw {
+            display: inline-flex; align-items: center; gap: 6px;
+        }
+        .swatch-row .box {
+            width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border);
+        }
+        .swatch-row .box.logical { background: #2a4a6e; border-color: #4ea1ff; }
+        .swatch-row .box.padded {
+            background: #5a3a12;
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,200,80,.2) 0 4px, transparent 4px 8px);
+            border-color: #e3a020; border-style: dashed;
+        }
+
+        /* Step 3: flatten — full-width tensor, no cores */
+        .stage.solo-tensor { grid-template-columns: 1fr; }
+        .stage.solo-tensor #coresPane { display: none; }
+
+        .flatten-stage {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 20px;
+            align-items: start;
+            width: 100%;
+        }
+        @media (max-width: 900px) {
+            .flatten-stage { grid-template-columns: 1fr; }
+            .flatten-arrow { transform: rotate(90deg); justify-self: center; }
+        }
+        .flatten-col h3 {
+            margin: 0 0 8px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .flatten-arrow {
+            align-self: center; font-size: 28px; color: var(--muted); padding-top: 40px;
+        }
+        .flatten-2d-wrap { width: max-content; max-width: 100%; }
+        .cube-plane.plane-gone {
+            opacity: 0 !important;
+            transition: opacity .35s ease, filter .35s ease;
+            filter: grayscale(1);
+            pointer-events: none;
+        }
+        .cube-plane.plane-leaving {
+            outline: 2px solid #fff;
+            outline-offset: 4px;
+            transition: opacity .45s ease, filter .45s ease, outline-color .2s;
+        }
+        .flat-row-slot {
+            display: contents;
+        }
+        .cell.flat-pending {
+            opacity: 0.12;
+            filter: grayscale(1);
+        }
+        .cell.flat-arriving {
+            animation: flatArrive .45s ease forwards;
+        }
+        @keyframes flatArrive {
+            from { opacity: 0.12; filter: grayscale(1); transform: translateY(-10px); }
+            to { opacity: 1; filter: none; transform: translateY(0); }
+        }
+        .cell.layer-tone {
+            border-color: color-mix(in srgb, var(--band-color, var(--accent)) 70%, var(--border));
+        }
+        /* Pad cells inside a z-band keep a muted tint so every pile reads as a full stripe. */
+        .cell.layer-tone.pad {
+            background: color-mix(in srgb, var(--band-color, var(--accent)) 28%, #1a1420) !important;
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,200,80,.10) 0 5px, transparent 5px 10px) !important;
+            border-style: dashed;
+            color: #c8b896;
+        }
+        .dim-badge {
+            display: inline-block; margin: 0 0 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 13px; padding: 6px 10px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--panel2);
+        }
+        .dim-badge.before {
+            border-color: #7a5cff; color: #c8b6ff;
+            box-shadow: 0 0 0 1px rgba(122, 92, 255, .25);
+        }
+        .dim-badge.after {
+            border-color: #3ecf8e; color: #9af0c4;
+            box-shadow: 0 0 0 1px rgba(62, 207, 142, .25);
+        }
+        .dim-badge em {
+            font-style: normal; font-weight: 700; color: #fff;
+            font-size: 15px;
+        }
+        .dim-arrow {
+            align-self: center; font-size: 28px; color: var(--muted); padding-top: 48px;
+        }
+        .flatten-col.empty-note .cube-hint { color: #ffb4b4; }
+        .flatten-status {
+            font-size: 12px; color: var(--muted);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            margin: 0 0 10px;
+        }
+        .flatten-status strong { color: var(--accent); font-weight: 600; }
+
+        /* Step 3.5: pulse matching z on 3D + 2D */
+        .flatten-stage.z-flashing .cube-plane:not(.z-flash) { opacity: .32; }
+        .flatten-stage.z-flashing .flatten-2d-wrap .cell[data-z]:not(.z-flash) { opacity: .28; }
+        .cube-plane.z-flash {
+            outline: 2px solid #fff;
+            outline-offset: 5px;
+            filter: brightness(1.35);
+            z-index: 2;
+        }
+        .cube-plane.z-flash .cube-plane-label { color: #fff; font-weight: 700; }
+        .cell.z-flash {
+            outline: 2px solid #fff;
+            outline-offset: 1px;
+            filter: brightness(1.45);
+            box-shadow: 0 0 10px rgba(255, 255, 255, .45);
+            z-index: 1;
+            position: relative;
+        }
+        .swatch-row .sw.z-flash {
+            color: #fff;
+            outline: 1px solid #fff;
+            outline-offset: 2px;
+            border-radius: 4px;
+            padding: 1px 4px;
+        }
+
+        .cores-grid {
+            display: grid;
+            gap: 14px;
+            width: max-content;
+        }
+        .core {
+            min-width: 140px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 8px;
+            transition: border-color .25s, opacity .2s;
+        }
+        .core.lit { border-color: var(--core-color, var(--accent)); }
+        .core-hd {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 12px; font-weight: 600; margin-bottom: 6px;
+        }
+        .core-hd .sw {
+            width: 10px; height: 10px; border-radius: 2px;
+            background: var(--core-color, var(--accent));
+        }
+        .core-slots {
+            display: flex; flex-direction: column; gap: 6px;
+            min-height: 28px;
+        }
+        .core-slots .placeholder {
+            color: var(--muted); font-size: 11px; font-style: italic;
+        }
+        .core .shard { transform: scale(.92); transform-origin: top left; }
+        .core .shard .shard-dim { display: none; }
+
+        .shard.flyer {
+            position: fixed; z-index: 50; margin: 0; pointer-events: none;
+            transition: left .55s cubic-bezier(.2,.7,.2,1), top .55s cubic-bezier(.2,.7,.2,1);
+            box-shadow: 0 8px 24px rgba(0,0,0,.45);
+        }
+
+        .stats-blob {
+            grid-column: 1 / -1;
+            margin-top: -8px;
+        }
+        .stats-blob > .section {
+            font-size: 13px; text-transform: uppercase; letter-spacing: .04em;
+            color: var(--muted); margin: 0 0 10px;
+        }
+        .stats-table {
+            border-collapse: collapse; font-size: 13px;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+            width: 100%; max-width: 520px;
+        }
+        .stats-table td { padding: 6px 16px 6px 12px; border-bottom: 1px solid var(--border); }
+        .stats-table tr:last-child td { border-bottom: none; }
+        .stats-table td.k { color: var(--muted); }
+        .stats-table td.v {
+            font-weight: 600; font-variant-numeric: tabular-nums; text-align: right;
+        }
+        .stats-table tr.hot td.v { color: var(--accent); font-size: 15px; }
+
+        .shape-pill {
+            display: inline-block;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            padding: 1px 7px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            margin-right: 6px;
+        }
+        .shape-pill em { color: var(--accent); font-style: normal; }
+
+        body.hl-mode-cell .cell:not(.hl-cell) { opacity: .28; }
+        body.hl-mode-cell .cell.hl-cell { outline: 2px solid #fff; outline-offset: 1px; z-index: 2; }
+        body.hl-mode-cell .core:not(.hl-core) { opacity: .4; }
+        body.hl-mode-shard .shard:not(.ghost):not(.hl) { opacity: .22; filter: grayscale(.7); }
+        body.hl-mode-shard .shard.hl { opacity: 1; filter: none; outline: 2px solid #fff; outline-offset: 2px; }
+        body.hl-mode-shard .core:not(.hl-core) { opacity: .4; }
+        body.hl-mode-core .core:not(.hl-core) { opacity: .35; }
+        body.hl-mode-core .cell:not(.hl-cell) { opacity: .28; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>2D sharding</h1>
+        <p>
+            Classic height / width / block sharding as four steps from
+            <code>TensorSpec</code> + <code>TensorLayout</code>, then
+            <code>Buffer</code> / <code>BufferDistributionSpec</code> for shard→core.
+            Default demo: logical <code>[2,3,5]</code> <code>TILE 2×2</code> → padded
+            <code>[2,4,6]</code> → physical <code>[8,6]</code> → block shards on a
+            <code>2×2</code> core grid. Step 1 is always the original logical input.
+        </p>
+        <nav class="topnav">
+            <a href="index.html">Overview</a>
+            <a href="buffer.html">Buffer page-mapping</a>
+            <a href="tensor.html">Tensor sharding</a>
+            <a href="animated.html">Interleaved</a>
+            <a href="shard_2d_anim.html" class="active">2D sharding</a>
+        </nav>
+    </header>
+
+    <div class="layout">
+        <div id="controls">
+            <div class="grp">Presets</div>
+            <div class="field">
+                <div class="preset-btns" id="presets">
+                    <button type="button" data-preset="tile-block">Tile · block</button>
+                    <button type="button" data-preset="tile-block-explicit">Tile · block 4×3</button>
+                    <button type="button" data-preset="tile-block-z4">Tile · block · z=4</button>
+                    <button type="button" data-preset="tile-height">Tile · height</button>
+                    <button type="button" data-preset="tile-width">Tile · width</button>
+                    <button type="button" data-preset="rm-height">RM · height</button>
+                </div>
+            </div>
+
+            <div class="grp">Tensor</div>
+            <div class="field">
+                <label>Logical shape</label>
+                <input id="logicalShape" value="2,3,5" />
+                <div class="hint">N-D, e.g. <code>2,3,5</code> or <code>64,96</code></div>
+            </div>
+            <div class="field">
+                <label>Layout</label>
+                <select id="layout">
+                    <option value="TILE" selected>TILE</option>
+                    <option value="ROW_MAJOR">ROW_MAJOR</option>
+                </select>
+            </div>
+            <div class="field tile-only">
+                <label>Tile (h × w)</label>
+                <div class="row2">
+                    <input id="tileH" type="number" min="1" value="2" />
+                    <span>×</span>
+                    <input id="tileW" type="number" min="1" value="2" />
+                </div>
+            </div>
+
+            <div class="grp">Sharding</div>
+            <div class="field">
+                <label>Model</label>
+                <select id="sharding">
+                    <option value="block" selected>block</option>
+                    <option value="height">height</option>
+                    <option value="width">width</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Configure by</label>
+                <select id="configBy">
+                    <option value="grid" selected>Core grid</option>
+                    <option value="shape">Shard shape</option>
+                </select>
+                <div class="hint">Pick one — the other is derived (1 shard / core).</div>
+            </div>
+            <div class="field" id="gridField">
+                <label>Core grid</label>
+                <div class="row2">
+                    <input id="gridX" type="number" min="1" value="2" />
+                    <span>×</span>
+                    <input id="gridY" type="number" min="1" value="2" />
+                </div>
+                <div class="hint" id="gridHint">Sets how many cores; shard shape is even-split auto.</div>
+            </div>
+            <div class="field" id="shardDimField">
+                <label>Shard shape (elem)</label>
+                <div class="row2">
+                    <input id="shardH" type="number" min="1" placeholder="H" title="Shard height (elements)" />
+                    <span>×</span>
+                    <input id="shardW" type="number" min="1" placeholder="W" title="Shard width (elements)" />
+                </div>
+                <div class="hint" id="shardHint">
+                    Height: H; width: W; block: H×W. Core grid is derived from physical ÷ shard.
+                </div>
+            </div>
+            <div class="field">
+                <label>Orientation</label>
+                <select id="orientation">
+                    <option value="row_major" selected>row_major</option>
+                    <option value="col_major">col_major</option>
+                </select>
+                <div class="hint" id="orientHint">
+                    How the shard grid maps onto the core grid (and auto-split for block).
+                </div>
+            </div>
+            <div class="field">
+                <label>Alignment</label>
+                <select id="alignMode">
+                    <option value="default" selected>default</option>
+                    <option value="shard_shape">shard shape</option>
+                    <option value="custom">custom</option>
+                </select>
+                <div class="hint" id="alignHint">
+                    <code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row/shard width).
+                </div>
+            </div>
+            <div class="field" id="customAlignField" style="display:none">
+                <label>Custom alignment</label>
+                <input id="alignment" placeholder="e.g. 4,4" />
+                <div class="hint">
+                    Passed as <code>TensorLayout(..., alignment)</code>; merged via
+                    <code>initialize_alignment</code> (each dim rounded up to the layout default).
+                </div>
+            </div>
+            <label class="toggle" title="Rank-3 padded shape as a rotatable cube of layers (same as tensor sharding)">
+                <input type="checkbox" id="cube3d" checked />
+                3D cube
+            </label>
+            <button class="apply" id="btnApply">Apply</button>
+            <div id="cfgError"></div>
+        </div>
+
+        <div id="main">
+            <div class="toolbar">
+                <button id="btnReset">Reset</button>
+                <button id="btnPrev">← Prev</button>
+                <button id="btnNext" class="primary">Next →</button>
+                <button id="btnPlay">Play</button>
+                <span class="state-label">Step <strong id="stateNum">1</strong> / 6 — <span id="stateName">input</span></span>
+                <div class="dots" id="dots" aria-hidden="true">
+                    <span class="on"></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+            </div>
+
+            <div class="stage">
+                <div class="pane">
+                    <h2 id="leftTitle">Tensor</h2>
+                    <p class="sub" id="tensorSub"></p>
+                    <div id="tensorStack" class="nd-stack"></div>
+                </div>
+                <div class="pane" id="coresPane">
+                    <h2>Cores <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0" id="coresLabel"></span></h2>
+                    <p class="sub" id="coresSub"></p>
+                    <div class="cores-grid" id="cores"></div>
+                </div>
+                <div class="stats-blob" id="summary">
+                    <h2 class="section">stats</h2>
+                    <div id="statsTable"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="page_mapping.js"></script>
+    <script src="tensor_mapping.js"></script>
+    <script>
+(function () {
+    "use strict";
+
+    const PALETTE = [
+        "#4ea1ff", "#7ee787", "#ffa657", "#d2a8ff",
+        "#ff7b72", "#79c0ff", "#a5d6ff", "#f2cc60",
+    ];
+    const colorFor = (i) => PALETTE[i % PALETTE.length];
+
+    const PRESETS = {
+        "tile-block":  { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block",  configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+        "tile-block-explicit": { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block", configBy: "shape", gridX: 2, gridY: 2, shardH: "4", shardW: "3", alignMode: "default" },
+        "tile-block-z4": { logicalShape: "4,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+        "tile-height": { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "height", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+        "tile-width":  { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "width",  configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+        "rm-height":   { logicalShape: "2,3,5", layout: "ROW_MAJOR", tileH: 2, tileW: 2, sharding: "height", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+    };
+
+    // Display labels for the walkthrough states (incl. 3.5).
+    const STEP_LABELS = ["1", "2", "3", "3.5", "4", "5", "6"];
+
+    const STATES = [
+        { name: "input",   title: "① Input — logical shape" },
+        { name: "align",   title: "② Align — logical → padded" },
+        { name: "flatten", title: "③ Flatten — ND → 2D" },
+        { name: "compare", title: "③½ Before / after squash" },
+        { name: "slice",   title: "④ Slice — 2D → shards" },
+        { name: "map",     title: "⑤ Map — shards → cores" },
+        { name: "core map", title: "⑥ Result — tensor colored by core" },
+    ];
+
+    let cfg = null;
+    let result = null;
+    let meta = null;
+    let state = 0;
+    let playing = false;
+    let playTimer = null;
+    let dealToken = 0;
+    let hoverKey = null;
+
+    // Shared cube orientation (same as tensor_app.js).
+    const cubeScenes = [];
+    let rotX = -20;
+    let rotY = -28;
+    let dragging3d = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const dom = {
+        logicalShape: document.getElementById("logicalShape"),
+        layout: document.getElementById("layout"),
+        tileH: document.getElementById("tileH"),
+        tileW: document.getElementById("tileW"),
+        sharding: document.getElementById("sharding"),
+        configBy: document.getElementById("configBy"),
+        gridField: document.getElementById("gridField"),
+        gridX: document.getElementById("gridX"),
+        gridY: document.getElementById("gridY"),
+        gridHint: document.getElementById("gridHint"),
+        shardDimField: document.getElementById("shardDimField"),
+        shardH: document.getElementById("shardH"),
+        shardW: document.getElementById("shardW"),
+        shardHint: document.getElementById("shardHint"),
+        orientation: document.getElementById("orientation"),
+        orientHint: document.getElementById("orientHint"),
+        alignMode: document.getElementById("alignMode"),
+        alignHint: document.getElementById("alignHint"),
+        customAlignField: document.getElementById("customAlignField"),
+        alignment: document.getElementById("alignment"),
+        cube3d: document.getElementById("cube3d"),
+        cfgError: document.getElementById("cfgError"),
+        tensorStack: document.getElementById("tensorStack"),
+        cores: document.getElementById("cores"),
+        statsTable: document.getElementById("statsTable"),
+        stateNum: document.getElementById("stateNum"),
+        stateName: document.getElementById("stateName"),
+        leftTitle: document.getElementById("leftTitle"),
+        tensorSub: document.getElementById("tensorSub"),
+        coresSub: document.getElementById("coresSub"),
+        coresLabel: document.getElementById("coresLabel"),
+        dots: [...document.getElementById("dots").children],
+        btnPrev: document.getElementById("btnPrev"),
+        btnNext: document.getElementById("btnNext"),
+        btnPlay: document.getElementById("btnPlay"),
+        tileOnly: document.querySelector(".tile-only"),
+    };
+
+    function parseInts(s) {
+        const parts = String(s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+        if (!parts.length) return [];
+        const nums = parts.map(Number);
+        if (nums.some((n) => !Number.isInteger(n) || n < 1)) throw new Error("dims must be positive integers");
+        return nums;
+    }
+
+    function readOptionalPositive(input) {
+        const s = String(input.value || "").trim();
+        if (!s) return 0;
+        const n = Number(s);
+        if (!Number.isInteger(n) || n < 1) throw new Error("shard dims must be positive integers (or blank for auto)");
+        return n;
+    }
+
+    function basePhysical(logicalShape, layout, tile, alignment) {
+        const TM = TensorMapping;
+        const pc = TM.pageConfig(layout, tile);
+        const mem = {
+            bufferType: "L1", memoryLayout: "INTERLEAVED",
+            shardSpec: null, ndShardSpec: null, createdWithNd: false,
+        };
+        const spec = TM.makeSpec(logicalShape, TM.makeLayout("BFLOAT16", pc, mem, alignment || []));
+        return spec.physical;
+    }
+
+    // Factor n cores into an X×Y grid closest to square (prefer wider: x ≥ y).
+    function nearestSquareGrid(n) {
+        const nCores = Math.max(1, n | 0);
+        let best = { x: nCores, y: 1 };
+        let bestScore = nCores - 1;
+        for (let y = 1; y * y <= nCores; y++) {
+            if (nCores % y !== 0) continue;
+            const x = nCores / y;
+            const score = Math.abs(x - y);
+            if (score < bestScore) {
+                best = { x, y };
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    // Inverse of even-split: one shard per core covering the physical tensor.
+    // Height/width (round-robin 1D): pack cores into a near-square grid.
+    // Block (grid_2d): core grid must match the 2D shard tiling + orientation.
+    function gridFromShardShape(sharding, physical, shardHeight, shardWidth, orientation) {
+        const [pH, pW] = physical;
+        const rowMajor = orientation !== "col_major";
+        if (sharding === "height") {
+            if (!(shardHeight > 0)) throw new Error("shard height required when configuring by shape");
+            return nearestSquareGrid(TensorMapping.divUp(pH, shardHeight));
+        }
+        if (sharding === "width") {
+            if (!(shardWidth > 0)) throw new Error("shard width required when configuring by shape");
+            return nearestSquareGrid(TensorMapping.divUp(pW, shardWidth));
+        }
+        // block: shard rows = ⌈H/sh⌉, shard cols = ⌈W/sw⌉
+        // row_major cores need (x=cols, y=rows); col_major needs (x=rows, y=cols)
+        if (!(shardHeight > 0) || !(shardWidth > 0)) {
+            throw new Error("shard H×W required when configuring by shape");
+        }
+        const rows = TensorMapping.divUp(pH, shardHeight);
+        const cols = TensorMapping.divUp(pW, shardWidth);
+        return rowMajor ? { x: cols, y: rows } : { x: rows, y: cols };
+    }
+
+    function readAlignMode() {
+        const m = dom.alignMode.value;
+        if (m === "shard_shape" || m === "custom") return m;
+        return "default";
+    }
+
+    function readCfg() {
+        const logicalShape = parseInts(dom.logicalShape.value);
+        if (logicalShape.length < 2) throw new Error("logical shape needs rank ≥ 2");
+        const layout = dom.layout.value;
+        const tile = [Number(dom.tileH.value) || 2, Number(dom.tileW.value) || 2];
+        const sharding = dom.sharding.value;
+        const configBy = dom.configBy.value === "shape" ? "shape" : "grid";
+        const orientation = dom.orientation.value === "col_major" ? "col_major" : "row_major";
+        const alignMode = readAlignMode();
+        // Custom is parsed here; shard_shape is resolved after a provisional map
+        // (needs the effective nd shard shape). Default → empty Alignment{}.
+        let alignment = [];
+        if (alignMode === "custom") {
+            const alignStr = dom.alignment.value.trim();
+            if (!alignStr) throw new Error("custom alignment needs a value, e.g. 4,4");
+            alignment = parseInts(alignStr);
+        }
+
+        let grid;
+        let shardHeight = 0;
+        let shardWidth = 0;
+
+        if (configBy === "grid") {
+            grid = { x: Number(dom.gridX.value) || 1, y: Number(dom.gridY.value) || 1 };
+            if (grid.x < 1 || grid.y < 1) throw new Error("core grid dims must be ≥ 1");
+            shardHeight = 0;
+            shardWidth = 0;
+        } else {
+            if (sharding === "height" || sharding === "block") {
+                shardHeight = readOptionalPositive(dom.shardH);
+                if (!shardHeight) throw new Error("shard height required when configuring by shape");
+            }
+            if (sharding === "width" || sharding === "block") {
+                shardWidth = readOptionalPositive(dom.shardW);
+                if (!shardWidth) throw new Error("shard width required when configuring by shape");
+            }
+            // Shape→grid uses physical under the alignment that will actually apply.
+            // For shard_shape mode, provisional physical uses default alignment.
+            const physical = basePhysical(logicalShape, layout, tile, alignment);
+            // Provisional grid (enough cores). Height/width are reshaped to a
+            // near-square after mapping once the aligned shard count is known.
+            grid = gridFromShardShape(sharding, physical, shardHeight, shardWidth, orientation);
+            dom.gridX.value = String(grid.x);
+            dom.gridY.value = String(grid.y);
+        }
+
+        return {
+            logicalShape, layout, tile, sharding, grid, configBy, orientation,
+            dtype: "BFLOAT16", alignMode, alignment,
+            shardHeight, shardWidth,
+        };
+    }
+
+    // Resolve TensorLayout Alignment for the three UI modes.
+    // shard_shape: use the effective 2D shard (elements) from a provisional map.
+    function resolveAlignment(cfg) {
+        if (cfg.alignMode === "custom") return cfg.alignment.slice();
+        if (cfg.alignMode !== "shard_shape") return [];
+        const provisional = TensorMapping.computeTensorMapping({ ...cfg, alignment: [] });
+        const nd = provisional.ndShardShape;
+        if (!nd || nd.length < 2) {
+            throw new Error("shard-shape alignment needs a 2D shard shape");
+        }
+        return nd.slice(-2);
+    }
+
+    // After compute: for height/width shape-mode, pack cores into nearest square
+    // using the real shard count (post tile/alignment), not the pre-align guess.
+    function refineShapeModeGrid(cfg, res) {
+        if (cfg.configBy !== "shape") return { cfg, res };
+        if (cfg.sharding !== "height" && cfg.sharding !== "width") return { cfg, res };
+        const ideal = nearestSquareGrid(res.mapping.numShards);
+        if (ideal.x === cfg.grid.x && ideal.y === cfg.grid.y) return { cfg, res };
+        const next = { ...cfg, grid: ideal };
+        dom.gridX.value = String(ideal.x);
+        dom.gridY.value = String(ideal.y);
+        return { cfg: next, res: TensorMapping.computeTensorMapping(next) };
+    }
+
+    function applyPreset(name) {
+        const p = PRESETS[name];
+        if (!p) return;
+        dom.logicalShape.value = p.logicalShape;
+        dom.layout.value = p.layout;
+        dom.tileH.value = p.tileH;
+        dom.tileW.value = p.tileW;
+        dom.sharding.value = p.sharding;
+        dom.configBy.value = p.configBy || "grid";
+        dom.gridX.value = p.gridX;
+        dom.gridY.value = p.gridY;
+        dom.shardH.value = p.shardH != null ? p.shardH : "";
+        dom.shardW.value = p.shardW != null ? p.shardW : "";
+        dom.orientation.value = p.orientation || "row_major";
+        dom.alignMode.value = p.alignMode || "default";
+        dom.alignment.value = p.alignment || "";
+        syncTileField();
+        syncConfigMode();
+        syncAlignMode();
+        recompute();
+    }
+
+    function syncTileField() {
+        dom.tileOnly.classList.toggle("disabled", dom.layout.value !== "TILE");
+        dom.tileOnly.style.opacity = dom.layout.value === "TILE" ? "" : ".35";
+        dom.tileOnly.style.pointerEvents = dom.layout.value === "TILE" ? "" : "none";
+    }
+
+    // Mutually exclusive: edit core grid XOR shard shape; the other is derived.
+    function syncConfigMode() {
+        const byShape = dom.configBy.value === "shape";
+        const sm = dom.sharding.value;
+        const showH = sm === "height" || sm === "block";
+        const showW = sm === "width" || sm === "block";
+
+        dom.gridField.classList.toggle("mode-off", byShape);
+        dom.gridField.classList.toggle("mode-on", !byShape);
+        dom.shardDimField.classList.toggle("mode-off", !byShape);
+        dom.shardDimField.classList.toggle("mode-on", byShape);
+
+        dom.gridX.readOnly = byShape;
+        dom.gridY.readOnly = byShape;
+
+        if (!byShape) {
+            dom.shardH.value = "";
+            dom.shardW.value = "";
+            dom.shardH.readOnly = true;
+            dom.shardW.readOnly = true;
+            dom.shardH.style.opacity = "";
+            dom.shardW.style.opacity = "";
+            dom.gridHint.textContent = "Editable — shard shape is even-split auto (1 shard/core).";
+            if (sm === "height") {
+                dom.shardHint.textContent = "Derived after Apply from physical height ÷ (grid X×Y).";
+            } else if (sm === "width") {
+                dom.shardHint.textContent = "Derived after Apply from physical width ÷ (grid X×Y).";
+            } else {
+                const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
+                dom.shardHint.textContent = orient === "col_major"
+                    ? "Derived after Apply: H = physH÷gridX, W = physW÷gridY (col_major)."
+                    : "Derived after Apply: H = physH÷gridY, W = physW÷gridX (row_major).";
+            }
+        } else {
+            dom.shardH.readOnly = !showH;
+            dom.shardW.readOnly = !showW;
+            if (!showH) dom.shardH.value = "";
+            if (!showW) dom.shardW.value = "";
+            dom.shardH.style.opacity = showH ? "" : ".35";
+            dom.shardW.style.opacity = showW ? "" : ".35";
+            dom.gridHint.textContent = "Derived after Apply from physical ÷ shard shape.";
+            if (sm === "height") {
+                dom.shardHint.textContent = "Set shard height (elements). Core grid = nearest square for ⌈physH/H⌉ cores.";
+            } else if (sm === "width") {
+                dom.shardHint.textContent = "Set shard width (elements). Core grid = nearest square for ⌈physW/W⌉ cores.";
+            } else {
+                const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
+                dom.shardHint.textContent = orient === "col_major"
+                    ? "Set shard H×W. Core grid = ⌈physH/H⌉ × ⌈physW/W⌉ (col_major)."
+                    : "Set shard H×W. Core grid = ⌈physW/W⌉ × ⌈physH/H⌉ (row_major).";
+            }
+        }
+        if (dom.orientHint) {
+            const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
+            if (sm === "block") {
+                dom.orientHint.textContent = orient === "col_major"
+                    ? "Block: shard (r,c) → core (r,c); auto-split uses gridX for height."
+                    : "Block: shard (r,c) → core (c,r); auto-split uses gridY for height.";
+            } else {
+                dom.orientHint.textContent = "Orders the core list for round-robin (height/width).";
+            }
+        }
+    }
+
+    function syncAlignMode() {
+        const mode = readAlignMode();
+        dom.customAlignField.style.display = mode === "custom" ? "" : "none";
+        if (mode === "default") {
+            dom.alignHint.innerHTML =
+                `<code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row/shard width).`;
+        } else if (mode === "shard_shape") {
+            dom.alignHint.innerHTML =
+                `Use the effective shard H×W as <code>TensorLayout</code> alignment (pads so the tensor divides into shards).`;
+        } else {
+            dom.alignHint.innerHTML =
+                `Enter a custom <code>Alignment</code> below.`;
+        }
+    }
+
+    function syncDerivedHints(res) {
+        if (!res) return;
+        const nd = res.ndShardShape;
+        const g = res.cfg.grid;
+        if (res.cfg.configBy === "grid" && nd) {
+            dom.shardH.placeholder = String(nd[nd.length - 2]);
+            dom.shardW.placeholder = String(nd[nd.length - 1]);
+            dom.shardHint.textContent =
+                `Derived shard shape [${nd.join(",")}] from core grid ${g.x}×${g.y}.`;
+        } else if (res.cfg.configBy === "shape") {
+            dom.gridHint.textContent =
+                `Derived core grid ${g.x}×${g.y} from shard shape` +
+                (nd ? ` [${nd.join(",")}]` : "") + `.`;
+            if (nd) {
+                dom.shardH.placeholder = String(nd[nd.length - 2]);
+                dom.shardW.placeholder = String(nd[nd.length - 1]);
+            }
+        }
+    }
+
+    // ---- derive view model from TensorMapping result ----
+    function buildMeta(res) {
+        const [ph, pw] = res.pageShape;
+        const [H, W] = res.physical;
+        const pagesH = res.tensor2dInPages[0];
+        const pagesW = res.tensor2dInPages[1];
+        const padded = res.paddedShape;
+        const rank = padded.length;
+        const depth = rank >= 3 ? padded.slice(0, -2).reduce((a, b) => a * b, 1) : 1;
+        const layerH = rank >= 2 ? padded[rank - 2] : 1;
+        const layerW = padded[rank - 1];
+
+        const pageOf = (r, c) => Math.floor(r / ph) * pagesW + Math.floor(c / pw);
+        const isPad = (r, c) => res.element.isPadding(r, c);
+
+        // Map page → shard / bank from buffer model
+        const pageToShard = new Array(res.mapping.numPages).fill(-1);
+        const pageToBank = new Array(res.mapping.numPages).fill(-1);
+        for (const bank of res.mapping.banks) {
+            for (const dp of bank.devicePages) {
+                if (dp.pageId == null) continue;
+                pageToShard[dp.pageId] = dp.shardId;
+                pageToBank[dp.pageId] = bank.bankId;
+            }
+        }
+
+        const shardOfPage = (pid) => (pid == null || pid < 0 ? -1 : pageToShard[pid]);
+        const bankOfPage = (pid) => (pid == null || pid < 0 ? -1 : pageToBank[pid]);
+
+        // Physical (r,c) → ND padded coords for labeling
+        function coordsOf(r, c) {
+            if (rank === 2) return [r, c];
+            const coords = new Array(rank);
+            coords[rank - 1] = c;
+            coords[rank - 2] = r % layerH;
+            let rest = Math.floor(r / layerH);
+            for (let d = rank - 3; d >= 0; d--) {
+                coords[d] = rest % padded[d];
+                rest = Math.floor(rest / padded[d]);
+            }
+            return coords;
+        }
+
+        return {
+            ph, pw, H, W, pagesH, pagesW, depth, layerH, layerW, rank, padded,
+            pageOf, isPad, shardOfPage, bankOfPage, coordsOf,
+            shards: res.mapping.shards,
+            banks: res.mapping.banks,
+            numCores: res.mapping.numBanks,
+            gridX: res.cfg.grid.x,
+            gridY: res.cfg.grid.y,
+        };
+    }
+
+    // ---- DOM builders ----
+    function makeCell(r, c, { colored, showPad, cellPx, ndCoord, noLabel, alignTone, layerTone }) {
+        const cell = document.createElement("div");
+        cell.className = "cell";
+        const pad = meta.isPad(r, c);
+        if (pad) cell.classList.add("pad");
+        else cell.classList.add("real");
+        const pageId = meta.pageOf(r, c);
+        const shardId = meta.shardOfPage(pageId);
+        const coreId = meta.bankOfPage(pageId);
+        cell.dataset.r = String(r);
+        cell.dataset.c = String(c);
+        cell.dataset.page = String(pageId);
+        cell.dataset.shard = String(shardId);
+        cell.dataset.core = String(coreId);
+        if (cellPx) {
+            cell.style.width = cell.style.height = cellPx + "px";
+        }
+        if (pad && !showPad) {
+            cell.style.visibility = "hidden";
+        }
+        if (alignTone) {
+            if (pad) {
+                cell.classList.add("pad-tone");
+                if (alignTone === "blink") cell.classList.add("pad-blink");
+            } else {
+                cell.classList.add("logical-tone");
+            }
+        } else if (colored && !pad) {
+            cell.classList.add("colored");
+            const col = colorFor(coreId);
+            cell.style.background = col;
+            cell.style.borderColor = col;
+        }
+        if (layerTone != null) {
+            cell.classList.add("layer-tone");
+            cell.style.setProperty("--band-color", colorFor(layerTone));
+            if (!pad) {
+                cell.style.background = colorFor(layerTone);
+                cell.style.color = "#0f1419";
+                cell.style.fontWeight = "600";
+            }
+        }
+        const coords = ndCoord || meta.coordsOf(r, c);
+        // 3D cube cells stay unlabeled — coordinate text overflows small cells.
+        // Hover title still carries the full (z,y,x) / page / shard / core info.
+        if (!noLabel) {
+            if (pad) cell.textContent = "·";
+            else if (coords.length >= 3) cell.textContent = cellPx && cellPx < 16 ? coords[coords.length - 1] : coords.join(",");
+            else cell.textContent = `${r},${c}`;
+        }
+        cell.title = pad
+            ? `padding [${coords.join(", ")}]\npage ${pageId}`
+            : `element [${coords.join(", ")}]\n→ page ${pageId} · shard ${shardId} · core ${coreId}`;
+        return cell;
+    }
+
+    // Rank-3 thing as a rotatable stack of d0 planes (tensor_app.js buildCube).
+    function buildCube([d0, d1, d2], makeCellFn, cellPx, planeGapOverride) {
+        const stage = document.createElement("div");
+        stage.className = "cube-stage" + (cellPx < 16 ? " small" : "");
+        stage.style.setProperty("--cell-px", cellPx + "px");
+        const scene = document.createElement("div");
+        scene.className = "cube-scene";
+        scene.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        cubeScenes.push(scene);
+        const planeGap = planeGapOverride != null
+            ? planeGapOverride
+            : (cellPx < 16 ? 56 : cellPx < 22 ? 72 : 96);
+        stage.dataset.planeGap = String(planeGap);
+        stage.dataset.d0 = String(d0);
+        for (let z = 0; z < d0; z++) {
+            const plane = document.createElement("div");
+            plane.className = "cube-plane";
+            plane.dataset.z = String(z);
+            plane.style.transform =
+                `translate(-50%, -50%) translateZ(${(z - (d0 - 1) / 2) * planeGap}px)`;
+            const lab = document.createElement("div");
+            lab.className = "cube-plane-label";
+            lab.textContent = `z = ${z}`;
+            plane.appendChild(lab);
+            const grid = document.createElement("div");
+            grid.className = "cells";
+            grid.style.gridTemplateColumns = `repeat(${d2}, ${cellPx}px)`;
+            for (let i = 0; i < d1 * d2; i++) grid.appendChild(makeCellFn(z * d1 * d2 + i));
+            plane.appendChild(grid);
+            scene.appendChild(plane);
+        }
+        stage.appendChild(scene);
+        stage.addEventListener("mousedown", (e) => {
+            dragging3d = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+        });
+        return stage;
+    }
+
+    // Rank-3 element cube. mode "logical" uses logicalShape extents only (step 1);
+    // mode "padded" uses paddedShape and shows hatched pads (step 2).
+    // Physical fold always uses padded layer height: (z,y,x) → (r = z·padH + y, c = x).
+    function buildElementCube({ colored, showPad, mode, alignTone, planeGap }) {
+        const padded = result.paddedShape;
+        const logical = result.logicalShape;
+        const shape = mode === "logical" ? logical : padded;
+        if (shape.length !== 3) throw new Error("element cube needs rank-3");
+        const [d0, d1, d2] = shape;
+        const padH = padded[padded.length - 2];
+        const total = d0 * d1 * d2;
+        const cellPx = total > 2500 ? 8 : total > 400 ? 12 : total > 120 ? 16 : 20;
+        cubeScenes.length = 0;
+        const stage = buildCube([d0, d1, d2], (i) => {
+            const z = Math.floor(i / (d1 * d2));
+            const rem = i % (d1 * d2);
+            const y = Math.floor(rem / d2);
+            const x = rem % d2;
+            const r = z * padH + y;
+            const c = x;
+            return makeCell(r, c, {
+                colored, showPad, cellPx, ndCoord: [z, y, x], noLabel: true, alignTone,
+            });
+        }, cellPx, planeGap);
+        const hint = document.createElement("div");
+        hint.className = "cube-hint";
+        hint.textContent = mode === "logical"
+            ? `drag to rotate · logical ${d0}×${d1}×${d2}`
+            : `drag to rotate · padded ${d0}×${d1}×${d2}`;
+        stage.appendChild(hint);
+        return stage;
+    }
+
+    function makePageEl(pageId, opts) {
+        const pr = Math.floor(pageId / meta.pagesW);
+        const pc = pageId % meta.pagesW;
+        const page = document.createElement("div");
+        page.className = "page";
+        page.dataset.page = String(pageId);
+        page.style.gridTemplateColumns = `repeat(${meta.pw}, var(--cell-w))`;
+        page.style.gridTemplateRows = `repeat(${meta.ph}, var(--cell-h))`;
+        for (let dr = 0; dr < meta.ph; dr++) {
+            for (let dc = 0; dc < meta.pw; dc++) {
+                const r = pr * meta.ph + dr;
+                const c = pc * meta.pw + dc;
+                if (r >= meta.H || c >= meta.W) continue;
+                page.appendChild(makeCell(r, c, opts));
+            }
+        }
+        return page;
+    }
+
+    function shardElemShape(shard) {
+        // Nominal shard shape in elements — the tile size every shard is cut to
+        // (including overhang padding on ragged edges). Do not use the filled
+        // page span: a last-column shard of shape [4,4] on physical width 6 still
+        // has W=4, with only 2 columns of real data.
+        if (result.ndShardShape && result.ndShardShape.length >= 2) {
+            return result.ndShardShape.slice(-2);
+        }
+        const [sh, sw] = shard.shape.length >= 2 ? shard.shape.slice(-2) : [1, shard.shape[0] || 1];
+        return [sh * meta.ph, sw * meta.pw];
+    }
+
+    function makeShardEl(shard, opts) {
+        const el = document.createElement("div");
+        el.className = "shard";
+        el.dataset.shard = String(shard.id);
+        const bank = meta.banks.find((b) => b.shardIds.includes(shard.id));
+        const coreId = bank ? bank.bankId : shard.id % meta.numCores;
+        el.dataset.core = String(coreId);
+        el.style.setProperty("--shard-color", colorFor(coreId));
+        const [sh, sw] = shard.shape.length >= 2 ? shard.shape.slice(-2) : [1, shard.shape[0] || 1];
+        el.style.gridTemplateColumns = `repeat(${sw}, max-content)`;
+        el.style.gridTemplateRows = `repeat(${sh}, max-content)`;
+
+        if (opts.showTag) {
+            const [eh, ew] = shardElemShape(shard);
+            el.dataset.shapeH = String(eh);
+            el.dataset.shapeW = String(ew);
+            const dimH = document.createElement("span");
+            dimH.className = "shard-dim shard-dim-h";
+            dimH.textContent = String(eh);
+            dimH.title = `shard height ${eh}`;
+            const dimW = document.createElement("span");
+            dimW.className = "shard-dim shard-dim-w";
+            dimW.textContent = String(ew);
+            dimW.title = `shard width ${ew}`;
+            el.appendChild(dimH);
+            el.appendChild(dimW);
+        }
+
+        // Place pages in shard-local row-major; null = overhang padding slot
+        for (let i = 0; i < shard.pages.length; i++) {
+            const pid = shard.pages[i];
+            if (pid == null) {
+                const ph = document.createElement("div");
+                ph.className = "page";
+                ph.style.gridTemplateColumns = `repeat(${meta.pw}, var(--cell-w))`;
+                ph.style.gridTemplateRows = `repeat(${meta.ph}, var(--cell-h))`;
+                for (let k = 0; k < meta.ph * meta.pw; k++) {
+                    const cell = document.createElement("div");
+                    cell.className = "cell pad";
+                    cell.textContent = "·";
+                    ph.appendChild(cell);
+                }
+                el.appendChild(ph);
+            } else {
+                el.appendChild(makePageEl(pid, opts));
+            }
+        }
+        return el;
+    }
+
+    // ND views for steps 1–2; flatten uses the folded physical 2D grid.
+    // mode: "logical" | "padded" | "flat"
+    // Align (padded) always uses the 3D cube when rank-3 — same as tensor sharding.
+    function buildNdView({ mode, colored, showPages, alignTone, planeGap }) {
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+
+        const rank3 =
+            (mode === "padded" ? result.paddedShape.length : result.logicalShape.length) === 3;
+        // Step 2 (align/padded) always stays in 3D for rank-3; input follows the checkbox.
+        const forceCube = mode === "padded" && rank3;
+        const useCube = mode !== "flat" && rank3 && (forceCube || dom.cube3d.checked);
+        if (useCube) {
+            stack.className = "";
+            const tone = mode === "padded" ? (alignTone || "blink") : null;
+            stack.appendChild(buildElementCube({
+                colored,
+                showPad: mode === "padded",
+                mode: mode === "logical" ? "logical" : "padded",
+                alignTone: tone,
+                planeGap,
+            }));
+            return;
+        }
+
+        if (mode === "flat") {
+            buildFlatFoldedView({ showPages, layerBands: true });
+            return;
+        }
+
+        // Flat fallback: logical = clip to logical 2D fold; padded = full physical.
+        stack.className = "nd-stack" + (showPages ? " show-pages" : "");
+        const logical2d = result.logical2d;
+        const rows = mode === "logical" ? logical2d[0] : meta.H;
+        const cols = mode === "logical" ? logical2d[1] : meta.W;
+        const showPad = mode !== "logical";
+        const grid = document.createElement("div");
+        grid.className = "grid2d" + (showPages ? " show-pages" : "");
+        const wrap = document.createElement("div");
+        wrap.className = "shard";
+        wrap.style.gridTemplateColumns = "max-content";
+
+        const pageGrid = document.createElement("div");
+        pageGrid.style.display = "grid";
+        pageGrid.style.gap = "2px";
+        if (mode === "logical") {
+            pageGrid.style.gridTemplateColumns = `repeat(${cols}, var(--cell-w))`;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    let rPhys = r, cPhys = c;
+                    if (result.logicalShape.length === 3) {
+                        const [, lH] = result.logicalShape;
+                        const z = Math.floor(r / lH);
+                        const y = r % lH;
+                        rPhys = z * meta.layerH + y;
+                        cPhys = c;
+                    }
+                    pageGrid.appendChild(makeCell(rPhys, cPhys, { colored, showPad: false }));
+                }
+            }
+            wrap.appendChild(pageGrid);
+            grid.appendChild(wrap);
+            stack.appendChild(grid);
+            return;
+        }
+
+        // Padded flat (non-cube): logical vs pad tones
+        pageGrid.style.gridTemplateColumns = `repeat(${cols}, var(--cell-w))`;
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                pageGrid.appendChild(makeCell(r, c, {
+                    colored, showPad: true, alignTone: alignTone || "blink",
+                }));
+            }
+        }
+        wrap.appendChild(pageGrid);
+        grid.appendChild(wrap);
+        stack.appendChild(grid);
+    }
+
+    // Number of z-planes (leading padded dim for rank-3). Drives legend + flash.
+    function numZPlanes() {
+        if (!result || result.paddedShape.length !== 3) return 0;
+        return result.paddedShape[0] | 0;
+    }
+
+    // Physical row → z plane index after squash: r = z·layerH + y.
+    function zOfRow(r) {
+        if (!meta || meta.layerH <= 0) return 0;
+        return Math.floor(r / meta.layerH);
+    }
+
+    function layerLegendEl() {
+        const legend = document.createElement("div");
+        legend.className = "swatch-row";
+        const d0 = numZPlanes();
+        if (d0 <= 0) return legend;
+        const layerH = meta.layerH;
+        for (let z = 0; z < d0; z++) {
+            const sw = document.createElement("span");
+            sw.className = "sw";
+            sw.dataset.z = String(z);
+            sw.innerHTML =
+                `<span class="box" style="background:${colorFor(z)};border-color:${colorFor(z)}"></span>` +
+                `z=${z} → rows ${z * layerH}…${z * layerH + layerH - 1}`;
+            legend.appendChild(sw);
+        }
+        return legend;
+    }
+
+    // Build the folded 2D page grid element (not mounted). Cells for z > revealedMax
+    // start as flat-pending when pendingFromZ is set.
+    function makeFlatGridEl({ layerBands, pendingFromZ }) {
+        const grid = document.createElement("div");
+        grid.className = "grid2d show-pages";
+        const wrap = document.createElement("div");
+        wrap.className = "shard";
+        wrap.style.gridTemplateColumns = "max-content";
+        const pageGrid = document.createElement("div");
+        pageGrid.className = "flat-page-grid";
+        pageGrid.style.display = "grid";
+        pageGrid.style.gap = "2px";
+        pageGrid.style.gridTemplateColumns = `repeat(${meta.W}, var(--cell-w))`;
+        const rank3 = result.paddedShape.length === 3;
+
+        for (let r = 0; r < meta.H; r++) {
+            for (let c = 0; c < meta.W; c++) {
+                const z = rank3 ? zOfRow(r) : 0;
+                const cell = makeCell(r, c, {
+                    showPad: true,
+                    alignTone: meta.isPad(r, c) ? "static" : null,
+                    layerTone: layerBands && rank3 ? z : null,
+                });
+                cell.dataset.z = String(z);
+                if (pendingFromZ != null && z > pendingFromZ) {
+                    cell.classList.add("flat-pending");
+                }
+                pageGrid.appendChild(cell);
+            }
+        }
+        wrap.appendChild(pageGrid);
+        grid.appendChild(wrap);
+        return grid;
+    }
+
+    // Folded physical 2D grid; optional per-z layer coloring to show ND → 2D map.
+    function buildFlatFoldedView({ showPages, layerBands }) {
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "nd-stack" + (showPages ? " show-pages" : "");
+        if (layerBands && result.paddedShape.length === 3) {
+            stack.appendChild(layerLegendEl());
+        }
+        stack.appendChild(makeFlatGridEl({ layerBands, pendingFromZ: null }));
+    }
+
+    function alignLegendHtml() {
+        return (
+            `<div class="swatch-row">` +
+            `<span class="sw"><span class="box logical"></span>logical</span>` +
+            `<span class="sw"><span class="box padded"></span>padding (blinks)</span>` +
+            `</div>`
+        );
+    }
+
+    // tight: start packed (no gaps) for the slice-open animation.
+    // pending: mark shards as unrevealed until animateSlice lights them.
+    function buildSlicedView({ colored, ghost, tight, pending }) {
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "nd-stack show-pages";
+
+        const grid = document.createElement("div");
+        grid.className = "grid2d show-pages" + (tight ? "" : " sliced");
+
+        // Arrange shards in their shard-grid positions. A squeezed 1D shard grid
+        // (classic height) is full-width strips → stack vertically; otherwise a
+        // 1D grid is laid out as a row (width-like).
+        const sg = result.mapping.shardGrid;
+        const sample = meta.shards[0];
+        const sampleW = sample && sample.shape.length ? sample.shape[sample.shape.length - 1] : 1;
+        const fullWidthStrip = sampleW >= meta.pagesW;
+        let sH, sW;
+        if (sg.length >= 2) {
+            sH = sg[sg.length - 2];
+            sW = sg[sg.length - 1];
+        } else {
+            sH = fullWidthStrip ? (sg[0] || 1) : 1;
+            sW = fullWidthStrip ? 1 : (sg[0] || 1);
+        }
+        grid.style.gridTemplateColumns = `repeat(${sW}, max-content)`;
+        grid.style.gridTemplateRows = `repeat(${sH}, max-content)`;
+
+        for (const shard of meta.shards) {
+            const el = makeShardEl(shard, { colored, showPad: true, showTag: true });
+            if (ghost) el.classList.add("ghost");
+            if (pending) el.classList.add("slice-pending");
+            else if (!tight) el.classList.add("shard-revealed");
+            let sr, sc;
+            if (shard.gridCoord.length >= 2) {
+                [sr, sc] = shard.gridCoord.slice(-2);
+            } else {
+                const i = shard.gridCoord[0] != null ? shard.gridCoord[0] : shard.id;
+                [sr, sc] = fullWidthStrip ? [i, 0] : [0, i];
+            }
+            el.style.gridRow = String(sr + 1);
+            el.style.gridColumn = String(sc + 1);
+            grid.appendChild(el);
+        }
+        stack.appendChild(grid);
+        return grid;
+    }
+
+    function shardElementBounds(shard) {
+        let r0 = Infinity, c0 = Infinity, r1 = -1, c1 = -1;
+        for (const pid of shard.pages) {
+            if (pid == null) continue;
+            const pr = Math.floor(pid / meta.pagesW);
+            const pc = pid % meta.pagesW;
+            const er0 = pr * meta.ph;
+            const ec0 = pc * meta.pw;
+            r0 = Math.min(r0, er0);
+            c0 = Math.min(c0, ec0);
+            r1 = Math.max(r1, er0 + meta.ph - 1);
+            c1 = Math.max(c1, ec0 + meta.pw - 1);
+        }
+        if (r1 < 0) return null;
+        return { r0, c0, r1, c1 };
+    }
+
+    // Paint shard cut outlines onto the continuous physical 2D grid (from step 3).
+    async function paintCutPreview(token) {
+        const pageGrid = dom.tensorStack.querySelector(".flat-page-grid");
+        if (!pageGrid) return;
+        for (const shard of meta.shards) {
+            if (token !== dealToken) return;
+            const bounds = shardElementBounds(shard);
+            if (!bounds) continue;
+            const bank = meta.banks.find((b) => b.shardIds.includes(shard.id));
+            const coreId = bank ? bank.bankId : shard.id % meta.numCores;
+            const col = colorFor(coreId);
+            const { r0, c0, r1, c1 } = bounds;
+            for (let r = r0; r <= r1; r++) {
+                for (let c = c0; c <= c1; c++) {
+                    const cell = pageGrid.querySelector(`[data-r="${r}"][data-c="${c}"]`);
+                    if (!cell) continue;
+                    cell.classList.add("cut-preview");
+                    cell.style.setProperty("--shard-color", col);
+                }
+            }
+            await sleep(160);
+        }
+    }
+
+    // Step 4: continue from step 3's physical 2D → cut preview → gaps → reveal.
+    async function animateSlice() {
+        const token = dealToken;
+        const stack = dom.tensorStack;
+        setCompareFlash(null, false);
+
+        const status = document.createElement("p");
+        status.className = "slice-status";
+
+        const stage = stack.querySelector(".flatten-stage");
+        if (stage) {
+            // Handoff: drop the 3D column, keep the same physical 2D from flatten/compare.
+            stage.classList.remove("z-flashing");
+            stage.querySelectorAll(".z-flash").forEach((el) => el.classList.remove("z-flash"));
+
+            const kids = [...stage.children];
+            const left = kids[0];
+            const arrow = kids[1];
+            const right = kids[2];
+
+            status.innerHTML =
+                `Same physical 2D from flatten <strong>[${result.physical.join(",")}]</strong> — now slice it`;
+            stack.insertBefore(status, stage);
+
+            if (left) left.classList.add("slice-exit");
+            if (arrow) arrow.classList.add("slice-exit");
+            right?.querySelectorAll(".dim-badge, .flatten-status").forEach((el) => el.remove());
+            const h3 = right?.querySelector("h3");
+            if (h3) h3.textContent = "Physical 2D (from flatten)";
+
+            await sleep(480);
+            if (token !== dealToken) return;
+            left?.remove();
+            arrow?.remove();
+            stage.classList.add("slice-solo");
+            await sleep(320);
+            if (token !== dealToken) return;
+        } else {
+            status.innerHTML =
+                `Physical 2D <strong>[${result.physical.join(",")}]</strong> — ready to cut into shards`;
+            buildFlatFoldedView({ showPages: true, layerBands: true });
+            stack.insertBefore(status, stack.firstChild);
+            await sleep(400);
+            if (token !== dealToken) return;
+        }
+
+        status.innerHTML =
+            `Drawing cut lines for <strong>${meta.shards.length}</strong> shards…`;
+        await paintCutPreview(token);
+        if (token !== dealToken) return;
+        await sleep(450);
+        if (token !== dealToken) return;
+
+        // Morph continuous grid → packed shard tiles (same stage, brief fade).
+        status.innerHTML = `Separating shards…`;
+        stack.classList.add("slice-morph-out");
+        await sleep(280);
+        if (token !== dealToken) return;
+
+        const grid = buildSlicedView({ colored: false, ghost: false, tight: true, pending: true });
+        stack.insertBefore(status, grid);
+        status.innerHTML = `Opening shard boundaries…`;
+        stack.classList.add("slice-morph-in");
+        stack.classList.remove("slice-morph-out");
+        await sleep(60);
+        if (token !== dealToken) return;
+
+        grid.classList.add("sliced");
+        await sleep(600);
+        if (token !== dealToken) return;
+        stack.classList.remove("slice-morph-in");
+
+        const shardEls = [...grid.querySelectorAll(".shard")];
+        for (const el of shardEls) {
+            if (token !== dealToken) return;
+            const eh = el.dataset.shapeH;
+            const ew = el.dataset.shapeW;
+            status.innerHTML =
+                `Shard shape <strong>[${eh}, ${ew}]</strong>` +
+                ` · height <strong>${eh}</strong> × width <strong>${ew}</strong>`;
+            el.classList.remove("slice-pending");
+            el.classList.add("slice-cutting", "shard-revealed");
+            await sleep(420);
+            if (token !== dealToken) return;
+            el.classList.remove("slice-cutting");
+            await sleep(100);
+        }
+
+        if (token !== dealToken) return;
+        const sample = meta.shards[0];
+        const [eh0, ew0] = sample ? shardElemShape(sample) : ["?", "?"];
+        status.innerHTML =
+            `Done — <strong>${meta.shards.length}</strong> shards of shape ` +
+            `<strong>[${eh0}, ${ew0}]</strong> ` +
+            `(H along left, W along bottom) from physical <strong>[${result.physical.join(",")}]</strong>`;
+    }
+
+    function buildCoresSkeleton() {
+        dom.cores.innerHTML = "";
+        dom.cores.style.gridTemplateColumns = `repeat(${meta.gridX}, max-content)`;
+        for (const bank of meta.banks) {
+            const { x, y } = bank.gridCoord;
+            const core = document.createElement("div");
+            core.className = "core";
+            core.dataset.core = String(bank.bankId);
+            core.style.setProperty("--core-color", colorFor(bank.bankId));
+            core.style.gridColumn = String(x + 1);
+            core.style.gridRow = String(y + 1);
+            core.innerHTML =
+                `<div class="core-hd"><span class="sw"></span>Core ${bank.bankId} (${x},${y})</div>` +
+                `<div class="core-slots" data-slots="${bank.bankId}"><span class="placeholder">(empty)</span></div>`;
+            dom.cores.appendChild(core);
+        }
+    }
+
+    function clearCoreSlots() {
+        for (const bank of meta.banks) {
+            const slots = dom.cores.querySelector(`[data-slots="${bank.bankId}"]`);
+            if (slots) slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            const core = dom.cores.querySelector(`[data-core="${bank.bankId}"]`);
+            if (core) core.classList.remove("lit");
+        }
+    }
+
+    function fillCoreSlots() {
+        for (const bank of meta.banks) {
+            const slots = dom.cores.querySelector(`[data-slots="${bank.bankId}"]`);
+            slots.innerHTML = "";
+            let any = false;
+            for (const sid of bank.shardIds) {
+                const shard = meta.shards.find((s) => s.id === sid);
+                if (!shard) continue;
+                any = true;
+                slots.appendChild(makeShardEl(shard, { colored: true, showPad: true, showTag: false }));
+            }
+            if (!any) slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            dom.cores.querySelector(`[data-core="${bank.bankId}"]`).classList.toggle("lit", any);
+        }
+    }
+
+    // ---- hover linking ----
+    function clearHover() {
+        hoverKey = null;
+        document.body.classList.remove("hl-mode-cell", "hl-mode-shard", "hl-mode-core");
+        document.querySelectorAll(".hl, .hl-cell, .hl-core").forEach((el) => {
+            el.classList.remove("hl", "hl-cell", "hl-core");
+        });
+    }
+    function beginHover(mode, key) {
+        const k = `${mode}:${key}`;
+        if (hoverKey === k) return false;
+        clearHover();
+        hoverKey = k;
+        document.body.classList.add(`hl-mode-${mode}`);
+        return true;
+    }
+    function setCellHover(r, c) {
+        if (!beginHover("cell", `${r},${c}`)) return;
+        document.querySelectorAll(`.cell[data-r="${r}"][data-c="${c}"]`).forEach((el) => el.classList.add("hl-cell"));
+        const cell = document.querySelector(`.cell[data-r="${r}"][data-c="${c}"]`);
+        if (cell && cell.dataset.core !== "-1") {
+            const core = document.querySelector(`.core[data-core="${cell.dataset.core}"]`);
+            if (core) core.classList.add("hl-core");
+        }
+    }
+    function setShardHover(sid) {
+        if (!beginHover("shard", String(sid))) return;
+        document.querySelectorAll(`.shard[data-shard="${sid}"]`).forEach((el) => {
+            if (!el.classList.contains("ghost")) el.classList.add("hl");
+        });
+        const shard = meta.shards.find((s) => s.id === Number(sid));
+        const bank = meta.banks.find((b) => b.shardIds.includes(Number(sid)));
+        if (bank) {
+            const core = document.querySelector(`.core[data-core="${bank.bankId}"]`);
+            if (core) core.classList.add("hl-core");
+        }
+    }
+    function setCoreHover(cid) {
+        if (!beginHover("core", String(cid))) return;
+        document.querySelectorAll(`.cell[data-core="${cid}"]`).forEach((el) => el.classList.add("hl-cell"));
+        const core = document.querySelector(`.core[data-core="${cid}"]`);
+        if (core) core.classList.add("hl-core");
+        const bank = meta.banks.find((b) => b.bankId === Number(cid));
+        if (bank) {
+            for (const sid of bank.shardIds) {
+                document.querySelectorAll(`.shard[data-shard="${sid}"]`).forEach((el) => {
+                    if (!el.classList.contains("ghost")) el.classList.add("hl");
+                });
+            }
+        }
+    }
+
+    document.addEventListener("pointerover", (e) => {
+        const t = e.target;
+        if (!(t instanceof Element)) { clearHover(); return; }
+        const cell = t.closest(".cell[data-r]");
+        const shard = t.closest(".shard[data-shard]");
+        const core = t.closest(".core[data-core]");
+        if (shard && shard.classList.contains("ghost")) { clearHover(); return; }
+        if (cell && t.closest("#tensorStack")) { setCellHover(cell.dataset.r, cell.dataset.c); return; }
+        if (core && shard) { setShardHover(shard.dataset.shard); return; }
+        if (core) { setCoreHover(core.dataset.core); return; }
+        if (shard && !shard.closest(".core")) { setShardHover(shard.dataset.shard); return; }
+        clearHover();
+    });
+    document.addEventListener("pointerout", (e) => {
+        const to = e.relatedTarget;
+        if (!(to instanceof Element) || !to.closest("#tensorStack, #cores")) clearHover();
+    });
+
+    // ---- chrome ----
+    function shapePills() {
+        const shard = result.ndShardShape;
+        return (
+            `<span class="shape-pill">logical <em>[${result.logicalShape.join(",")}]</em></span>` +
+            `<span class="shape-pill">padded <em>[${result.paddedShape.join(",")}]</em></span>` +
+            `<span class="shape-pill">physical <em>[${result.physical.join(",")}]</em></span>` +
+            `<span class="shape-pill">align <em>[${result.alignment.join(",")}]</em></span>` +
+            (shard
+                ? `<span class="shape-pill">shard <em>[${shard.join(",")}]</em></span>`
+                : "")
+        );
+    }
+
+    // Same stats blob as tensor.html / tensor_app.js renderSummary.
+    function renderSummary(res) {
+        const m = res.mapping;
+        const orient = (res.cfg && res.cfg.orientation) || "row_major";
+        const rows = [
+            ["Logical shape", res.logicalShape.join(" × "), true],
+            ["Layout", res.layout === "TILE" ? `tile ${res.tile.join("×")}` : "row-major"],
+            ["Data type", res.dtype],
+            ["Memory layout", res.memoryLayout.toLowerCase().replace("_", " ")],
+            ["Alignment mode", (res.cfg && res.cfg.alignMode) || "default"],
+            ["Alignment", `[${res.alignment.join(", ")}]`],
+            ["Padded shape", res.paddedShape.join(" × ")],
+            ["Physical 2D (elements)", `${res.physical[0]} × ${res.physical[1]}`, true],
+            ["Page shape (elements)", `${res.pageShape[0]} × ${res.pageShape[1]}`],
+            ["Tensor in pages", `${res.tensor2dInPages[0]} × ${res.tensor2dInPages[1]}  (= ${m.numPages})`, true],
+        ];
+        if (res.distribution !== "interleaved") {
+            rows.push(["Shard (elements)", res.ndShardShape ? res.ndShardShape.join(" × ") : "—"]);
+            rows.push(["Shard (pages)", res.shardShapeInPages ? res.shardShapeInPages.join(" × ") : "—"]);
+            rows.push(["Distribution", res.distribution === "grid_2d" ? "grid (2D)" : "round-robin (1D)"]);
+            rows.push(["Orientation", orient]);
+            rows.push(["Shards", m.numShards]);
+        }
+        rows.push(["Cores (banks)", m.numBanks]);
+        rows.push(["Max slots / core", m.maxSlotsPerCore]);
+        dom.statsTable.innerHTML =
+            '<table class="stats-table"><tbody>' +
+            rows
+                .map(([k, v, hot]) => `<tr class="${hot ? "hot" : ""}"><td class="k">${k}</td><td class="v">${v}</td></tr>`)
+                .join("") +
+            "</tbody></table>";
+    }
+
+    function updateChrome() {
+        const st = STATES[state];
+        dom.stateNum.textContent = STEP_LABELS[state] || String(state + 1);
+        dom.stateName.textContent = st.name;
+        dom.leftTitle.textContent = st.title;
+        renderSummary(result);
+        dom.dots.forEach((d, i) => d.classList.toggle("on", i === state));
+        dom.btnPrev.disabled = state === 0 || playing;
+        dom.btnNext.disabled = state === STATES.length - 1 || playing;
+
+        // Steps 3 → 4: omit core grid (cores arrive in step 5).
+        const stageEl = document.querySelector(".stage");
+        stageEl.classList.toggle("solo-tensor", state === 2 || state === 3 || state === 4);
+
+        const kind = result.memoryLayout.replace("_SHARDED", "").toLowerCase();
+        dom.coresLabel.textContent = `(${meta.gridX}×${meta.gridY})`;
+        const orient = (result.cfg && result.cfg.orientation) || "row_major";
+        dom.coresSub.textContent =
+            `${kind}-sharded · ${result.distribution} · ${orient} · ${result.mapping.numShards} shards`;
+
+        if (state === 0) {
+            const cubeOn = dom.cube3d.checked && result.logicalShape.length === 3;
+            dom.tensorSub.innerHTML =
+                `<span class="shape-pill">logical <em>[${result.logicalShape.join(",")}]</em></span>` +
+                (cubeOn
+                    ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em> of input layers`
+                    : ` · original input (no padding)`);
+        } else if (state === 1) {
+            dom.tensorSub.innerHTML = alignLegendHtml() + shapePills() +
+                (result.paddedShape.length === 3
+                    ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em>`
+                    : ` · padded ND`);
+        } else if (state === 2) {
+            dom.tensorSub.innerHTML = shapePills() +
+                ` · high <code>z</code> leaves first · 3D stays empty when drained`;
+        } else if (state === 3) {
+            dom.tensorSub.innerHTML =
+                `<span class="dim-badge before">before <em>[${result.paddedShape.join(",")}]</em></span>` +
+                ` → ` +
+                `<span class="dim-badge after">after <em>[${result.physical.join(",")}]</em></span>`;
+        } else if (state === 4) {
+            dom.tensorSub.innerHTML =
+                `${result.mapping.numShards} shards · each ~[${(result.ndShardShape || []).join(",")}] elem` +
+                ` · page ${result.pageShape.join("×")}`;
+        } else if (state === 5) {
+            dom.tensorSub.innerHTML = shapePills() + ` · shards dealt to cores`;
+        } else {
+            dom.tensorSub.innerHTML =
+                shapePills() +
+                ` · <em style="color:var(--accent);font-style:normal">colored by destination core</em>` +
+                ` · cores keep live shards`;
+        }
+    }
+
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+    // Step 2: show padded cube with distinct logical/pad colors; pads blink in.
+    async function animateAlign({ fromLogical }) {
+        const token = ++dealToken;
+        if (fromLogical && result.paddedShape.length === 3) {
+            // Start as logical cube, then swap to padded with blink.
+            buildNdView({ mode: "logical", colored: false, showPages: false });
+            await sleep(450);
+            if (token !== dealToken) return;
+        }
+        buildNdView({ mode: "padded", colored: false, showPages: false, alignTone: "blink" });
+        // Brief emphasis: ensure blink class is live (CSS infinite handles the rest).
+        const pads = dom.tensorStack.querySelectorAll(".cell.pad-tone");
+        pads.forEach((el, i) => {
+            el.style.animationDelay = `${(i % 6) * 0.05}s`;
+        });
+    }
+
+    function colorCubePlanesByZ(cube) {
+        const planes = [...cube.querySelectorAll(".cube-plane")];
+        planes.forEach((plane) => {
+            const z = Number(plane.dataset.z);
+            plane.querySelectorAll(".cell").forEach((cell) => {
+                cell.dataset.z = String(z);
+                cell.classList.remove("logical-tone", "pad-tone");
+                cell.classList.add("layer-tone");
+                cell.style.setProperty("--band-color", colorFor(z));
+                if (!cell.classList.contains("pad")) {
+                    cell.style.background = colorFor(z);
+                    cell.style.color = "#0f1419";
+                    cell.style.fontWeight = "600";
+                }
+            });
+        });
+        return planes;
+    }
+
+    // End-of-flatten (and skip-to) view: empty 3D cube | full 2D grid.
+    function buildFlattenEndView() {
+        rotX = -20;
+        rotY = -28;
+        if (result.paddedShape.length !== 3) {
+            buildFlatFoldedView({ showPages: true, layerBands: true });
+            return;
+        }
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "";
+
+        const wrap = document.createElement("div");
+        wrap.className = "flatten-stage";
+
+        const left = document.createElement("div");
+        left.className = "flatten-col empty-note";
+        left.innerHTML = "<h3>3D (padded ND)</h3>";
+        const status = document.createElement("p");
+        status.className = "flatten-status";
+        status.innerHTML = `Empty — all <code>z</code> planes moved to 2D`;
+        left.appendChild(status);
+        const cube = buildElementCube({
+            colored: false, showPad: true, mode: "padded", alignTone: "static",
+        });
+        const planes = colorCubePlanesByZ(cube);
+        planes.forEach((p) => p.classList.add("plane-gone"));
+        const hint = cube.querySelector(".cube-hint");
+        if (hint) hint.textContent = "cube empty";
+        left.appendChild(cube);
+
+        const arrow = document.createElement("div");
+        arrow.className = "flatten-arrow";
+        arrow.textContent = "→";
+
+        const right = document.createElement("div");
+        right.className = "flatten-col";
+        right.innerHTML = "<h3>2D (physical)</h3>";
+        right.appendChild(layerLegendEl());
+        const flatWrap = document.createElement("div");
+        flatWrap.className = "flatten-2d-wrap";
+        flatWrap.appendChild(makeFlatGridEl({ layerBands: true, pendingFromZ: null }));
+        right.appendChild(flatWrap);
+
+        wrap.appendChild(left);
+        wrap.appendChild(arrow);
+        wrap.appendChild(right);
+        stack.appendChild(wrap);
+    }
+
+    // Step 3.5: full before-squash 3D cube beside after-squash 2D, dims highlighted.
+    function buildCompareView() {
+        rotX = -20;
+        rotY = -28;
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "";
+
+        const wrap = document.createElement("div");
+        wrap.className = "flatten-stage";
+
+        const left = document.createElement("div");
+        left.className = "flatten-col";
+        left.innerHTML = "<h3>Before squash — 3D</h3>";
+        const beforeBadge = document.createElement("div");
+        beforeBadge.className = "dim-badge before";
+        beforeBadge.innerHTML = `padded ND <em>[${result.paddedShape.join(",")}]</em>`;
+        left.appendChild(beforeBadge);
+        const status = document.createElement("p");
+        status.className = "flatten-status";
+        status.id = "compareFlashStatus";
+        left.appendChild(status);
+
+        if (result.paddedShape.length === 3) {
+            const cube = buildElementCube({
+                colored: false, showPad: true, mode: "padded", alignTone: "static",
+            });
+            colorCubePlanesByZ(cube);
+            const hint = cube.querySelector(".cube-hint");
+            if (hint) hint.textContent = "matching z flashes on both sides";
+            left.appendChild(cube);
+        } else {
+            status.textContent = "Rank ≠ 3 — compare dims in the badges; 2D is the physical grid.";
+        }
+
+        const arrow = document.createElement("div");
+        arrow.className = "dim-arrow";
+        arrow.textContent = "→";
+
+        const right = document.createElement("div");
+        right.className = "flatten-col";
+        right.innerHTML = "<h3>After squash — 2D</h3>";
+        const afterBadge = document.createElement("div");
+        afterBadge.className = "dim-badge after";
+        afterBadge.innerHTML = `physical 2D <em>[${result.physical.join(",")}]</em>`;
+        right.appendChild(afterBadge);
+        right.appendChild(layerLegendEl());
+        const flatWrap = document.createElement("div");
+        flatWrap.className = "flatten-2d-wrap";
+        flatWrap.appendChild(makeFlatGridEl({ layerBands: true, pendingFromZ: null }));
+        right.appendChild(flatWrap);
+
+        wrap.appendChild(left);
+        wrap.appendChild(arrow);
+        wrap.appendChild(right);
+        stack.appendChild(wrap);
+    }
+
+    function setCompareFlash(z, on) {
+        const root = dom.tensorStack.querySelector(".flatten-stage");
+        if (!root) return;
+        root.classList.toggle("z-flashing", on && z != null);
+        root.querySelectorAll(".z-flash").forEach((el) => el.classList.remove("z-flash"));
+        if (!on || z == null) return;
+        root.querySelectorAll(`.cube-plane[data-z="${z}"]`).forEach((el) => el.classList.add("z-flash"));
+        // Only the folded 2D grid — cube cells also carry data-z for tooltips/style,
+        // but plane outline is the 3D highlight.
+        root.querySelectorAll(`.flatten-2d-wrap .cell[data-z="${z}"]`).forEach((el) => el.classList.add("z-flash"));
+        root.querySelectorAll(`.swatch-row .sw[data-z="${z}"]`).forEach((el) => el.classList.add("z-flash"));
+        const status = document.getElementById("compareFlashStatus");
+        if (status) {
+            const layerH = meta.layerH;
+            const n = numZPlanes();
+            status.innerHTML =
+                `Flash <strong>z = ${z}</strong> <span style="opacity:.7">(${n - z}/${n})</span> on 3D + 2D rows ` +
+                `<strong>${z * layerH}…${z * layerH + layerH - 1}</strong>`;
+        }
+    }
+
+    // Loop high→low over every z plane (not just 2) until the step is left.
+    async function runCompareFlashLoop() {
+        const token = dealToken;
+        const d0 = numZPlanes();
+        if (d0 <= 0) return;
+        await sleep(350);
+        while (token === dealToken) {
+            for (let z = d0 - 1; z >= 0; z--) {
+                if (token !== dealToken) return;
+                setCompareFlash(z, true);
+                await sleep(650);
+                if (token !== dealToken) return;
+                setCompareFlash(z, false);
+                await sleep(140);
+            }
+        }
+    }
+
+    // Step 3: highest z leaves first; 3D stays empty when drained.
+    async function animateFlatten() {
+        const token = ++dealToken;
+        rotX = -20;
+        rotY = -28;
+
+        if (result.paddedShape.length !== 3) {
+            buildFlatFoldedView({ showPages: true, layerBands: true });
+            return;
+        }
+
+        const d0 = result.paddedShape[0];
+        const layerH = meta.layerH;
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "";
+
+        const wrap = document.createElement("div");
+        wrap.className = "flatten-stage";
+
+        const left = document.createElement("div");
+        left.className = "flatten-col";
+        left.innerHTML = "<h3>3D (padded ND)</h3>";
+        const status = document.createElement("p");
+        status.className = "flatten-status";
+        status.innerHTML = `Highest <code>z</code> leaves first…`;
+        left.appendChild(status);
+        const cube = buildElementCube({
+            colored: false, showPad: true, mode: "padded", alignTone: "static",
+        });
+        const planes = colorCubePlanesByZ(cube);
+        const hint = cube.querySelector(".cube-hint");
+        if (hint) hint.textContent = "high z → 2D first";
+        left.appendChild(cube);
+
+        const arrow = document.createElement("div");
+        arrow.className = "flatten-arrow";
+        arrow.textContent = "→";
+
+        const right = document.createElement("div");
+        right.className = "flatten-col";
+        right.innerHTML = "<h3>2D (physical)</h3>";
+        right.appendChild(layerLegendEl());
+        const flatWrap = document.createElement("div");
+        flatWrap.className = "flatten-2d-wrap";
+        // pendingFromZ: -1 means nothing revealed yet
+        const flatGrid = makeFlatGridEl({ layerBands: true, pendingFromZ: -1 });
+        flatWrap.appendChild(flatGrid);
+        right.appendChild(flatWrap);
+
+        wrap.appendChild(left);
+        wrap.appendChild(arrow);
+        wrap.appendChild(right);
+        stack.appendChild(wrap);
+
+        await sleep(400);
+        if (token !== dealToken) return;
+
+        for (let z = d0 - 1; z >= 0; z--) {
+            if (token !== dealToken) return;
+            const plane = planes[z];
+            status.innerHTML =
+                `<strong>z = ${z}</strong> leaves the cube → rows ` +
+                `<strong>${z * layerH}…${z * layerH + layerH - 1}</strong> on the 2D grid`;
+
+            if (plane) {
+                plane.classList.add("plane-leaving");
+                await sleep(280);
+                if (token !== dealToken) return;
+                plane.classList.add("plane-gone");
+                plane.classList.remove("plane-leaving");
+            }
+
+            const cells = flatGrid.querySelectorAll(`.cell[data-z="${z}"]`);
+            cells.forEach((cell) => {
+                cell.classList.remove("flat-pending");
+                cell.classList.add("flat-arriving");
+            });
+            await sleep(520);
+            if (token !== dealToken) return;
+            cells.forEach((cell) => cell.classList.remove("flat-arriving"));
+            await sleep(180);
+        }
+
+        if (token !== dealToken) return;
+        left.classList.add("empty-note");
+        status.innerHTML = `Empty — all <code>z</code> planes moved to 2D`;
+        if (hint) hint.textContent = "cube empty";
+        // Keep empty 3D + filled 2D (do not replace with 2D-only).
+    }
+
+    async function animateDeal() {
+        const token = ++dealToken;
+        buildSlicedView({ colored: false, ghost: false });
+        clearCoreSlots();
+        for (const bank of meta.banks) {
+            const slots = dom.cores.querySelector(`[data-slots="${bank.bankId}"]`);
+            if (slots) slots.innerHTML = "";
+        }
+
+        for (const shard of meta.shards) {
+            if (token !== dealToken) return;
+            const src = dom.tensorStack.querySelector(`.shard[data-shard="${shard.id}"]`);
+            const bank = meta.banks.find((b) => b.shardIds.includes(shard.id));
+            if (!src || !bank) continue;
+            const slots = dom.cores.querySelector(`[data-slots="${bank.bankId}"]`);
+            const coreBox = dom.cores.querySelector(`[data-core="${bank.bankId}"]`);
+
+            const srcRect = src.getBoundingClientRect();
+            const destProbe = document.createElement("div");
+            destProbe.style.height = `${srcRect.height}px`;
+            destProbe.style.width = "1px";
+            slots.appendChild(destProbe);
+            const destRect = destProbe.getBoundingClientRect();
+            destProbe.remove();
+
+            const flyer = makeShardEl(shard, { colored: true, showPad: true, showTag: false });
+            flyer.className = "shard flyer";
+            flyer.style.left = `${srcRect.left}px`;
+            flyer.style.top = `${srcRect.top}px`;
+            document.body.appendChild(flyer);
+
+            src.style.opacity = "0";
+            coreBox.classList.add("lit");
+            flyer.getBoundingClientRect();
+            flyer.style.left = `${destRect.left}px`;
+            flyer.style.top = `${destRect.top}px`;
+
+            await sleep(580);
+            if (token !== dealToken) { flyer.remove(); return; }
+
+            flyer.remove();
+            slots.appendChild(makeShardEl(shard, { colored: true, showPad: true, showTag: false }));
+            src.classList.add("ghost");
+            src.style.opacity = "";
+        }
+
+        for (const bank of meta.banks) {
+            const slots = dom.cores.querySelector(`[data-slots="${bank.bankId}"]`);
+            if (slots && !slots.children.length) {
+                slots.innerHTML = `<span class="placeholder">(empty)</span>`;
+            }
+        }
+        buildSlicedView({ colored: false, ghost: true });
+    }
+
+    // Step 6: original logical cube/grid colored by destination core (like
+    // interleaved "tensor as core map"). Cores keep the dealt shards.
+    function buildCoreMapView() {
+        rotX = -20;
+        rotY = -28;
+        if (result.logicalShape.length === 3) {
+            const stack = dom.tensorStack;
+            stack.innerHTML = "";
+            cubeScenes.length = 0;
+            stack.className = "";
+            const cube = buildElementCube({
+                colored: true, showPad: false, mode: "logical", alignTone: null,
+            });
+            const hint = cube.querySelector(".cube-hint");
+            if (hint) hint.textContent = "colored by destination core · drag to rotate";
+            stack.appendChild(cube);
+        } else {
+            buildNdView({ mode: "logical", colored: true, showPages: false });
+        }
+        fillCoreSlots();
+    }
+
+    async function goTo(next, { animate = true } = {}) {
+        dealToken++;
+        clearHover();
+        document.querySelectorAll(".flyer").forEach((f) => f.remove());
+
+        const prev = state;
+        state = next;
+        updateChrome();
+
+        if (state === 0) {
+            rotX = -20;
+            rotY = -28;
+            buildNdView({ mode: "logical", colored: false, showPages: false });
+            clearCoreSlots();
+        } else if (state === 1) {
+            // Align: logical vs pad colors; pads blink
+            if (animate && prev === 0) {
+                await animateAlign({ fromLogical: true });
+            } else {
+                buildNdView({ mode: "padded", colored: false, showPages: false, alignTone: "blink" });
+            }
+            clearCoreSlots();
+        } else if (state === 2) {
+            // Flatten: high-z leaves first; settle with empty 3D + filled 2D
+            if (animate && (prev === 1 || prev === 0)) {
+                await animateFlatten();
+            } else {
+                buildFlattenEndView();
+            }
+            clearCoreSlots();
+        } else if (state === 3) {
+            // 3.5 — before (full 3D) vs after (2D); loop high→low z flash on both
+            buildCompareView();
+            clearCoreSlots();
+            void runCompareFlashLoop();
+        } else if (state === 4) {
+            rotX = -20;
+            rotY = -28;
+            if (animate && (prev === 3 || prev === 2)) {
+                await animateSlice();
+            } else {
+                buildSlicedView({ colored: false, ghost: false });
+            }
+            clearCoreSlots();
+        } else if (state === 5) {
+            if (animate && prev === 4) {
+                await animateDeal();
+            } else {
+                buildSlicedView({ colored: false, ghost: true });
+                fillCoreSlots();
+            }
+        } else if (state === 6) {
+            // Result: original tensor colored by core; cores keep live shards.
+            const token = dealToken;
+            if (animate && prev === 5) {
+                await sleep(280);
+                if (token !== dealToken) return;
+            }
+            buildCoreMapView();
+        }
+    }
+
+    function stopPlay() {
+        playing = false;
+        dom.btnPlay.textContent = "Play";
+        if (playTimer) { clearTimeout(playTimer); playTimer = null; }
+        updateChrome();
+    }
+
+    async function play() {
+        if (playing) { stopPlay(); return; }
+        playing = true;
+        dom.btnPlay.textContent = "Pause";
+        if (state === STATES.length - 1) await goTo(0, { animate: false });
+        while (playing && state < STATES.length - 1) {
+            await goTo(state + 1, { animate: true });
+            if (!playing) break;
+            if (state < STATES.length - 1) {
+                await new Promise((resolve) => {
+                    // Longer holds after align (blink) and flatten (collapse) animations.
+                    // Step 3.5: hold long enough for a full high→low pass over all z planes.
+                    const zHold = Math.max(1600, numZPlanes() * 800 + 400);
+                    const hold = state === 1 ? 1400
+                        : state === 2 ? 900
+                        : state === 3 ? zHold
+                        : state === 4 ? 900
+                        : state === 5 ? 400
+                        : state === 6 ? 1200
+                        : 1100;
+                    playTimer = setTimeout(resolve, hold);
+                });
+            }
+        }
+        stopPlay();
+    }
+
+    // ---- shareable link (same style as tensor.html) ----
+    // #shape=2x3x5,layout=TILE,tile=2x2,sharding=block,by=grid,grid=2x2,...
+    const shapeEnc = (s) => String(s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean).join("x");
+    const shapeDec = (s) => String(s || "").split("x").map((x) => x.trim()).filter(Boolean).join(",");
+
+    function encodeHash() {
+        const p = [];
+        p.push("shape=" + shapeEnc(dom.logicalShape.value));
+        p.push("layout=" + dom.layout.value);
+        if (dom.layout.value === "TILE") {
+            p.push("tile=" + dom.tileH.value + "x" + dom.tileW.value);
+        }
+        p.push("sharding=" + dom.sharding.value);
+        p.push("by=" + (dom.configBy.value === "shape" ? "shape" : "grid"));
+        p.push("grid=" + dom.gridX.value + "x" + dom.gridY.value);
+        if (dom.shardH.value.trim()) p.push("sh=" + dom.shardH.value.trim());
+        if (dom.shardW.value.trim()) p.push("sw=" + dom.shardW.value.trim());
+        if (dom.orientation.value === "col_major") p.push("orient=col_major");
+        if (dom.alignMode.value === "shard_shape") p.push("alignMode=shard_shape");
+        else if (dom.alignMode.value === "custom") {
+            p.push("alignMode=custom");
+            if (dom.alignment.value.trim()) p.push("align=" + shapeEnc(dom.alignment.value));
+        }
+        if (!dom.cube3d.checked) p.push("cube3d=0");
+        if (state > 0) p.push("step=" + (STEP_LABELS[state] || String(state + 1)));
+        return p.join(",");
+    }
+
+    let lastHash = null;
+    function updateHash() {
+        const h = encodeHash();
+        if (h === lastHash) return;
+        lastHash = h;
+        if (window.history && history.replaceState) {
+            try { history.replaceState(null, "", "#" + h); }
+            catch (e) { /* jsdom / sandboxed frames */ }
+        }
+    }
+
+    function applyHash() {
+        const raw = (location.hash || "").replace(/^#/, "");
+        if (!raw) return null;
+        const obj = {};
+        for (const kv of raw.split(",")) {
+            const i = kv.indexOf("=");
+            if (i > 0) obj[kv.slice(0, i)] = kv.slice(i + 1);
+        }
+        const setV = (inp, v) => { if (v != null && v !== "") inp.value = v; };
+
+        if (obj.shape) setV(dom.logicalShape, shapeDec(obj.shape));
+        setV(dom.layout, obj.layout);
+        if (obj.tile) {
+            const [th, tw] = obj.tile.split("x");
+            setV(dom.tileH, th);
+            setV(dom.tileW, tw);
+        }
+        setV(dom.sharding, obj.sharding);
+        if (obj.by === "shape" || obj.by === "grid") dom.configBy.value = obj.by;
+        if (obj.grid) {
+            const [x, y] = obj.grid.split("x");
+            setV(dom.gridX, x);
+            setV(dom.gridY, y);
+        }
+        // Shape dims: clear first so omitted keys mean auto (grid mode).
+        dom.shardH.value = "";
+        dom.shardW.value = "";
+        setV(dom.shardH, obj.sh);
+        setV(dom.shardW, obj.sw);
+        // If link carries sh/sw but no by=, prefer shape mode.
+        if ((obj.sh || obj.sw) && obj.by == null) dom.configBy.value = "shape";
+        if (obj.orient === "col_major" || obj.orient === "row_major") {
+            dom.orientation.value = obj.orient;
+        }
+        // Legacy links with only align=… imply custom mode.
+        if (obj.alignMode === "shard_shape" || obj.alignMode === "custom" || obj.alignMode === "default") {
+            dom.alignMode.value = obj.alignMode;
+        } else if (obj.align) {
+            dom.alignMode.value = "custom";
+        } else {
+            dom.alignMode.value = "default";
+        }
+        dom.alignment.value = "";
+        setV(dom.alignment, obj.align && shapeDec(obj.align));
+        dom.cube3d.checked = obj.cube3d !== "0";
+
+        let stepIdx = 0;
+        if (obj.step != null) {
+            const label = String(obj.step);
+            const found = STEP_LABELS.indexOf(label);
+            if (found >= 0) stepIdx = found;
+            else {
+                const n = Number(label);
+                if (Number.isInteger(n) && n >= 1 && n <= STATES.length) stepIdx = n - 1;
+            }
+        }
+        return stepIdx;
+    }
+
+    function recompute({ fromHash = false, stepIdx = 0 } = {}) {
+        dom.cfgError.textContent = "";
+        try {
+            cfg = readCfg();
+            cfg.alignment = resolveAlignment(cfg);
+            result = TensorMapping.computeTensorMapping(cfg);
+            ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
+            // Shape-mode grid refine can change shard count; re-resolve shard_shape
+            // alignment against the final mapping so Alignment matches the shards.
+            if (cfg.alignMode === "shard_shape") {
+                const nextAlign = (result.ndShardShape || []).slice(-2);
+                if (nextAlign.length === 2 &&
+                    (cfg.alignment[0] !== nextAlign[0] || cfg.alignment[1] !== nextAlign[1])) {
+                    cfg = { ...cfg, alignment: nextAlign };
+                    result = TensorMapping.computeTensorMapping(cfg);
+                    ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
+                }
+            }
+            meta = buildMeta(result);
+        } catch (e) {
+            dom.cfgError.textContent = e.message || String(e);
+            return false;
+        }
+
+        // Scale cells a bit for larger tensors
+        const maxDim = Math.max(result.physical[0], result.physical[1]);
+        const cw = maxDim > 16 ? 20 : maxDim > 10 ? 24 : 28;
+        const ch = maxDim > 16 ? 16 : maxDim > 10 ? 18 : 22;
+        document.documentElement.style.setProperty("--cell-w", cw + "px");
+        document.documentElement.style.setProperty("--cell-h", ch + "px");
+
+        syncDerivedHints(result);
+        buildCoresSkeleton();
+        const next = Math.max(0, Math.min(STATES.length - 1, stepIdx | 0));
+        goTo(next, { animate: false });
+        if (!fromHash) updateHash();
+        else lastHash = encodeHash();
+        return true;
+    }
+
+    // ---- 3D drag (shared orientation across cube scenes) ----
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging3d || !cubeScenes.length) return;
+        const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        rotY += dx * 0.4;
+        rotX = Math.max(-89, Math.min(89, rotX - dy * 0.4));
+        const t = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        cubeScenes.forEach((s) => { s.style.transform = t; });
+    });
+    document.addEventListener("mouseup", () => { dragging3d = false; });
+
+    // Keep step in the hash when navigating (shareable deep link).
+    const _goTo = goTo;
+    goTo = async function (next, opts) {
+        await _goTo(next, opts);
+        updateHash();
+    };
+
+    // ---- wire controls ----
+    document.getElementById("btnApply").addEventListener("click", () => recompute({ stepIdx: state }));
+    document.getElementById("btnReset").addEventListener("click", () => goTo(0, { animate: false }));
+    dom.btnPrev.addEventListener("click", () => { if (state > 0) goTo(state - 1, { animate: false }); });
+    dom.btnNext.addEventListener("click", () => { if (state < STATES.length - 1) goTo(state + 1, { animate: true }); });
+    dom.btnPlay.addEventListener("click", () => play());
+    dom.layout.addEventListener("change", syncTileField);
+    dom.sharding.addEventListener("change", syncConfigMode);
+    dom.configBy.addEventListener("change", syncConfigMode);
+    dom.orientation.addEventListener("change", syncConfigMode);
+    dom.alignMode.addEventListener("change", syncAlignMode);
+    dom.cube3d.addEventListener("change", () => {
+        // Align / core-map force 3D for rank-3; checkbox mainly affects the input step.
+        if (state === 0 || state === 1 || state === 6) goTo(state, { animate: false });
+        else { updateChrome(); updateHash(); }
+    });
+    document.querySelectorAll("#presets button").forEach((btn) => {
+        btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
+    });
+
+    window.addEventListener("hashchange", () => {
+        const raw = (location.hash || "").replace(/^#/, "");
+        if (raw === lastHash) return;
+        const stepIdx = applyHash();
+        syncTileField();
+        syncConfigMode();
+        syncAlignMode();
+        recompute({ fromHash: true, stepIdx: stepIdx || 0 });
+    });
+
+    syncTileField();
+    syncConfigMode();
+    syncAlignMode();
+    {
+        const stepIdx = applyHash();
+        syncTileField();
+        syncConfigMode();
+        syncAlignMode();
+        recompute({ fromHash: !!location.hash, stepIdx: stepIdx || 0 });
+    }
+})();
+    </script>
+</body>
+</html>

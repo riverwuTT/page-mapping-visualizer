@@ -21,7 +21,7 @@
         h1 { font-size: 26px; margin: 0 0 6px; }
         .sub { color: var(--muted); margin: 0 0 36px; }
         code { color: var(--accent); background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-        .cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
+        .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
         @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } }
         .card {
             display: block; text-decoration: none; color: inherit;
@@ -33,6 +33,11 @@
         .card p { margin: 0 0 12px; color: var(--text); font-size: 13.5px; }
         .card .flow { color: var(--muted); font-size: 12.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
         .chip { display: inline-block; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 2px 9px; margin: 3px 4px 0 0; }
+        .section-label {
+            margin: 36px 0 8px; font-size: 13px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .section-sub { color: var(--muted); margin: 0 0 14px; font-size: 13.5px; }
         .note { margin-top: 36px; color: var(--muted); font-size: 13px; }
         .note h3 { color: var(--text); font-size: 14px; margin: 0 0 6px; }
         a.src { color: var(--accent); text-decoration: none; }
@@ -44,7 +49,7 @@
         <h1>tt-metal sharding visualizers</h1>
         <p class="sub">
             Interactive JavaScript ports of tt-metal's data-layout model — how a tensor's elements
-            end up scattered across device cores. Three ways in:
+            end up scattered across device cores.
         </p>
 
         <div class="cards">
@@ -76,17 +81,39 @@
                     <span class="chip">grid (width / block)</span><span class="chip">ND</span>
                 </div>
             </a>
+        </div>
 
+        <h2 class="section-label">Animated mappings</h2>
+        <p class="section-sub">
+            Step-through walkthroughs of how pages and shards land on cores — one animation per
+            distribution style.
+        </p>
+        <div class="cards">
             <a class="card" href="animated.html">
-                <h2>Animated mappings →</h2>
+                <h2>Interleaved →</h2>
                 <p>
                     Watch interleaved mapping unfold: a tensor is sliced into pages
                     (<code>ROW_MAJOR</code> or <code>TILE</code>) and dealt round-robin onto cores.
                 </p>
-                <div class="flow">tensor → pages → cores (animated)</div>
+                <div class="flow">tensor → pages → cores (round-robin)</div>
                 <div style="margin-top:10px">
                     <span class="chip">interleave</span><span class="chip">row major</span>
                     <span class="chip">tile</span><span class="chip">step-through</span>
+                </div>
+            </a>
+
+            <a class="card" href="shard_2d_anim.html">
+                <h2>2D sharding →</h2>
+                <p>
+                    Classic height / width / block:
+                    <em>input</em> → <em>align</em> (pad) → <em>flatten</em> (ND→2D) →
+                    <em>slice</em> → <em>shards→cores</em>. Driven by
+                    <code>tensor_mapping.js</code>.
+                </p>
+                <div class="flow">input → pad → flatten → slice → cores</div>
+                <div style="margin-top:10px">
+                    <span class="chip">height</span><span class="chip">width</span>
+                    <span class="chip">block</span><span class="chip">step-through</span>
                 </div>
             </a>
         </div>
@@ -98,7 +125,8 @@
                 missing step in front of it: folding an element shape into pages via the layout
                 (<code>compute_physical_shape</code> → <code>get_page_shape</code>), then handing the
                 resulting page grid + shard shape to the very same page → core logic. Animated mappings
-                tells the interleaved half of that story as a short step-through. Sources:
+                walk through that story per distribution — interleaved round-robin, or classic 2D
+                height / width / block. Sources:
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/experimental/tensor/spec/tensor_spec.hpp">tensor_spec.hpp</a>,
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/buffer.hpp">buffer.hpp</a>.
             </p>

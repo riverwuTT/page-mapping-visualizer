@@ -34,6 +34,62 @@ eq(T.computeLogical2dShape([2, 3, 30, 30]), [180, 30], "logical 2d fold");
 eq(T.recommendedShardAlignment(T.pageConfig("ROW_MAJOR"), "BFLOAT16"), [32], "rm recommended align bf16");
 eq(T.recommendedShardAlignment(T.pageConfig("ROW_MAJOR"), "FLOAT32"), [16], "rm recommended align fp32");
 
+// ROW_MAJOR default Alignment is the width of the row (page/shard width).
+{
+    const pc = T.pageConfig("ROW_MAJOR");
+    eq(T.createDefaultAlignment(pc, "BFLOAT16", { shardSpec: null, ndShardSpec: null }), [1],
+        "rm interleaved default align {1}");
+    eq(T.createDefaultAlignment(pc, "BFLOAT16", { shardSpec: { shape: [4, 12] }, ndShardSpec: null }), [12],
+        "rm sharded default align = row/shard width");
+    eq(T.createDefaultAlignment(pc, "BFLOAT16", { shardSpec: null, ndShardSpec: { shardShape: [4, 12] } }), [12],
+        "rm nd-sharded default align = row/shard width");
+
+    const h = T.computeTensorMapping({
+        logicalShape: [2, 3, 5], layout: "ROW_MAJOR", sharding: "height", grid: { x: 2, y: 2 },
+    });
+    eq(h.alignment, [5], "rm height-sharded Alignment = row width");
+    eq(h.pageShape, [1, 5], "rm height-sharded page = one full row");
+    eq(h.alignment[h.alignment.length - 1], h.pageShape[1], "rm Alignment last dim == page width");
+}
+
+// Explicit shard shape is honored for classic height / width / block.
+{
+    const h = T.computeTensorMapping({
+        logicalShape: [2, 3, 5], layout: "TILE", tile: [2, 2], sharding: "height",
+        grid: { x: 2, y: 2 }, shardHeight: 4,
+    });
+    eq(h.ndShardShape, [4, 6], "explicit height shard [4, fullW]");
+
+    const w = T.computeTensorMapping({
+        logicalShape: [2, 3, 5], layout: "TILE", tile: [2, 2], sharding: "width",
+        grid: { x: 2, y: 2 }, shardWidth: 2,
+    });
+    eq(w.ndShardShape, [8, 2], "explicit width shard [fullH, 2]");
+
+    const b = T.computeTensorMapping({
+        logicalShape: [2, 3, 5], layout: "TILE", tile: [2, 2], sharding: "block",
+        grid: { x: 2, y: 2 }, shardHeight: 4, shardWidth: 3,
+    });
+    eq(b.ndShardShape, [4, 4], "explicit block shard width rounded to tile (3→4)");
+    // physical [8,6], shard [4,4] → ceil(8/4)×ceil(6/4) = 2×2 shards
+    eq(b.mapping.numShards, 4, "explicit block fits 2×2 core grid");
+    eq(b.mapping.shardShape.slice(-2), [2, 2], "explicit block shard in pages");
+}
+
+// Classic block on rank-3 uses the folded 2D page grid (post-flatten), so
+// GRID_2D never sees an N-D page shape that squeezes down to rank-1.
+{
+    const r = T.computeTensorMapping({
+        logicalShape: [2, 3, 5], layout: "ROW_MAJOR", sharding: "block",
+        grid: { x: 2, y: 2 },
+    });
+    eq(r.physical, [6, 32], "RM rank-3 block physical (width RECOMMENDED-aligned)");
+    eq(r.tensor2dInPages, [6, 1], "RM rank-3 block folded 2D pages");
+    eq(r.distribution, "grid_2d", "RM rank-3 block is GRID_2D");
+    eq(r.mapping.shardGrid.length, 2, "RM rank-3 block shard grid stays rank-2");
+    eq(r.mapping.numShards, 2, "RM rank-3 block → 2 shards on 2×2 (width-1 page)");
+}
+
 // ---- golden: tile, block-sharded [128,128] over 2×2 -------------------------
 {
     const r = T.computeTensorMapping({ logicalShape: [128, 128], layout: "TILE", sharding: "block", grid: { x: 2, y: 2 } });
