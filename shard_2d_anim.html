@@ -1050,11 +1050,18 @@
                 shardWidth = readOptionalPositive(dom.shardW);
                 if (!shardWidth) throw new Error("shard width required when configuring by shape");
             }
-            // Shape→grid uses physical under the alignment that will actually apply.
-            // For shard_shape mode, provisional physical uses default alignment.
-            const physical = basePhysical(logicalShape, layout, tile, alignment);
-            // Provisional grid (enough cores). Height/width are reshaped to a
-            // near-square after mapping once the aligned shard count is known.
+            // Provisional grid from physical under the best-known alignment.
+            // shard_shape: use the requested shard H×W (TensorLayout alignment will
+            // be that shape). custom: use the parsed alignment. default: [].
+            // recompute() re-derives after resolveAlignment so this is a first guess
+            // (needed so the provisional map inside resolveAlignment can run).
+            let alignForPhys = alignment;
+            if (alignMode === "shard_shape") {
+                if (sharding === "block") alignForPhys = [shardHeight, shardWidth];
+                else if (sharding === "height") alignForPhys = [shardHeight];
+                else if (sharding === "width") alignForPhys = [shardWidth];
+            }
+            const physical = basePhysical(logicalShape, layout, tile, alignForPhys);
             grid = gridFromShardShape(sharding, physical, shardHeight, shardWidth, orientation);
             dom.gridX.value = String(grid.x);
             dom.gridY.value = String(grid.y);
@@ -1068,10 +1075,17 @@
     }
 
     // Resolve TensorLayout Alignment for the three UI modes.
-    // shard_shape: use the effective 2D shard (elements) from a provisional map.
+    // shard_shape: pad so the tensor divides into the shard shape.
     function resolveAlignment(cfg) {
         if (cfg.alignMode === "custom") return cfg.alignment.slice();
         if (cfg.alignMode !== "shard_shape") return [];
+        // Block + configure-by-shape: the typed H×W *is* the intended Alignment
+        // (merged with layout defaults via initialize_alignment). Avoids a
+        // provisional map that would need a correct core grid first.
+        if (cfg.configBy === "shape" && cfg.sharding === "block" &&
+            cfg.shardHeight > 0 && cfg.shardWidth > 0) {
+            return [cfg.shardHeight, cfg.shardWidth];
+        }
         const provisional = TensorMapping.computeTensorMapping({ ...cfg, alignment: [] });
         const nd = provisional.ndShardShape;
         if (!nd || nd.length < 2) {
@@ -1080,12 +1094,39 @@
         return nd.slice(-2);
     }
 
-    // After compute: for height/width shape-mode, pack cores into nearest square
-    // using the real shard count (post tile/alignment), not the pre-align guess.
+    // Shape-mode: derive core grid from physical under the resolved TensorLayout
+    // alignment. Critical for shard_shape / custom, where padding changes H×W
+    // (and thus ⌈phys / shard⌉) vs the default-alignment guess in readCfg.
+    function applyShapeModeGridFromAlignment(cfg) {
+        if (cfg.configBy !== "shape") return cfg;
+        const physical = basePhysical(cfg.logicalShape, cfg.layout, cfg.tile, cfg.alignment);
+        const grid = gridFromShardShape(
+            cfg.sharding, physical, cfg.shardHeight, cfg.shardWidth, cfg.orientation
+        );
+        if (grid.x === cfg.grid.x && grid.y === cfg.grid.y) return cfg;
+        dom.gridX.value = String(grid.x);
+        dom.gridY.value = String(grid.y);
+        return { ...cfg, grid };
+    }
+
+    // After compute: keep shape-mode core grid in sync with the real mapping.
+    // Height/width: pack cores into a nearest square from the shard count.
+    // Block: re-derive from physical ÷ *effective* shard (tile/REQUIRED may bump
+    // the typed 2×2 up to the tile size).
     function refineShapeModeGrid(cfg, res) {
         if (cfg.configBy !== "shape") return { cfg, res };
-        if (cfg.sharding !== "height" && cfg.sharding !== "width") return { cfg, res };
-        const ideal = nearestSquareGrid(res.mapping.numShards);
+        let ideal;
+        if (cfg.sharding === "height" || cfg.sharding === "width") {
+            ideal = nearestSquareGrid(res.mapping.numShards);
+        } else if (cfg.sharding === "block") {
+            const nd = res.ndShardShape;
+            if (!nd || nd.length < 2) return { cfg, res };
+            ideal = gridFromShardShape(
+                "block", res.physical, nd[nd.length - 2], nd[nd.length - 1], cfg.orientation
+            );
+        } else {
+            return { cfg, res };
+        }
         if (ideal.x === cfg.grid.x && ideal.y === cfg.grid.y) return { cfg, res };
         const next = { ...cfg, grid: ideal };
         dom.gridX.value = String(ideal.x);
@@ -2641,15 +2682,21 @@
         try {
             cfg = readCfg();
             cfg.alignment = resolveAlignment(cfg);
+            // Alignment (esp. shard_shape) changes physical — re-derive the core
+            // grid from padded physical ÷ shard before the mapping runs.
+            cfg = applyShapeModeGridFromAlignment(cfg);
             result = TensorMapping.computeTensorMapping(cfg);
             ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
-            // Shape-mode grid refine can change shard count; re-resolve shard_shape
-            // alignment against the final mapping so Alignment matches the shards.
+            // Shape-mode grid refine can change the effective shard; re-resolve
+            // shard_shape alignment against the final mapping, then re-derive grid.
             if (cfg.alignMode === "shard_shape") {
                 const nextAlign = (result.ndShardShape || []).slice(-2);
                 if (nextAlign.length === 2 &&
-                    (cfg.alignment[0] !== nextAlign[0] || cfg.alignment[1] !== nextAlign[1])) {
+                    (cfg.alignment.length !== 2 ||
+                     cfg.alignment[0] !== nextAlign[0] ||
+                     cfg.alignment[1] !== nextAlign[1])) {
                     cfg = { ...cfg, alignment: nextAlign };
+                    cfg = applyShapeModeGridFromAlignment(cfg);
                     result = TensorMapping.computeTensorMapping(cfg);
                     ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
                 }
