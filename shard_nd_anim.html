@@ -1,21 +1,23 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-  Classic 2D sharding walkthrough (HEIGHT / WIDTH / BLOCK).
+  ND sharding walkthrough (TensorSpec::sharded / NdShardSpec).
 
   Pipeline matches TensorSpec + TensorLayout (+ Buffer shard→core):
     1. logical → padded     compute_padded_shape (Alignment)
-    2. padded ND → 2D       compute_physical_shape / fold leading dims into H
-    3. slice 2D → shards    TensorSpec::{height,width,block}_sharded
+    2. align shard shape    ShardShapeAlignment {NONE,REQUIRED,RECOMMENDED}
+    3. slice ND → shards    pages_to_shards on N-D page grid (no flatten)
     4. shards → cores       BufferDistributionSpec (round_robin | grid_2d)
 
+  Unlike classic 2D height/width/block, ND keeps the N-D page grid —
+  convert_shape_to_pages only divides the last two dims by the page shape.
   Numbers come from tensor_mapping.js (same model as tensor.html).
 -->
 <html lang="en">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>2D sharding — pad → flatten → slice → cores</title>
+    <title>ND sharding — pad → shard-align → slice → cores</title>
     <style>
         :root {
             --bg: #0f1419;
@@ -226,6 +228,52 @@
             background: color-mix(in srgb, var(--shard-color, var(--accent)) 8%, transparent);
         }
         .shard.ghost { opacity: .18; filter: grayscale(.6); }
+        /* Rank-3 shard: pages laid out as a mini rotatable cube */
+        .shard.shard-3d {
+            display: block;
+            padding: 6px;
+        }
+        .shard .cube-stage.shard-cube {
+            width: 220px; height: 200px; perspective: 700px;
+            background: radial-gradient(ellipse at center, #11161d 0%, #0a0d12 100%);
+            border: 1px solid color-mix(in srgb, var(--shard-color, var(--accent)) 40%, var(--border));
+            border-radius: 8px;
+        }
+        .shard .cube-stage.shard-cube.small {
+            width: 150px; height: 140px; perspective: 560px;
+        }
+        .shard .cube-stage.shard-cube .cube-plane .cells {
+            gap: 3px; padding: 4px;
+            background: color-mix(in srgb, var(--shard-color, var(--accent)) 14%, #0c1016);
+            outline-color: color-mix(in srgb, var(--shard-color, var(--accent)) 55%, transparent);
+        }
+        .shard .cube-stage.shard-cube .cube-plane-label {
+            color: var(--shard-color, var(--accent));
+        }
+        /* Solid fills so overlapping z-planes stay readable */
+        .shard .cell.real {
+            background: color-mix(in srgb, var(--shard-color, var(--accent)) 72%, #0f1419) !important;
+            border-color: color-mix(in srgb, var(--shard-color, var(--accent)) 90%, #fff) !important;
+            box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25);
+        }
+        .shard .cell.real.colored {
+            background: var(--cell-fill, var(--shard-color, var(--accent))) !important;
+            border-color: color-mix(in srgb, var(--cell-fill, var(--shard-color)) 70%, #fff) !important;
+        }
+        .shard .cell.pad {
+            background: #2a3140 !important;
+            border-color: #4a5568 !important;
+            border-style: dashed;
+            opacity: .85;
+        }
+        .shard .page {
+            border: 1px solid color-mix(in srgb, var(--shard-color, var(--accent)) 50%, #3d4a5c) !important;
+            border-radius: 4px;
+            background: color-mix(in srgb, var(--shard-color, var(--accent)) 8%, transparent);
+        }
+        .shard.flyer .cube-stage.shard-cube {
+            width: 150px; height: 140px; perspective: 560px;
+        }
         /* H along left edge, W along bottom — emphasize shard shape */
         .shard .shard-dim {
             position: absolute;
@@ -570,26 +618,60 @@
         }
         body.hl-mode-core .core:not(.hl-core) { opacity: .35; }
         body.hl-mode-core .cell:not(.hl-cell) { opacity: .28; }
+
+        /* ND shard-grid planes (rank ≥ 3) */
+        .nd-shard-planes {
+            display: flex; flex-direction: column; gap: 18px;
+            width: max-content;
+        }
+        .nd-shard-plane-lab {
+            font-size: 12px; color: var(--accent);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            margin: 0 0 6px;
+        }
+        .shard-align-panel {
+            display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start;
+        }
+        .shard-align-card {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 12px 14px; min-width: 180px;
+        }
+        .shard-align-card h3 {
+            margin: 0 0 8px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .shard-align-card .big {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 18px; font-weight: 700; color: var(--text);
+        }
+        .shard-align-card .big.hot { color: #ffa657; }
+        .shard-align-card .note {
+            margin-top: 8px; font-size: 12px; color: var(--muted);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .shard-align-arrow {
+            align-self: center; font-size: 28px; color: var(--muted); padding-top: 18px;
+        }
     </style>
 </head>
 <body>
     <header>
-        <h1>2D sharding</h1>
+        <h1>ND sharding</h1>
         <p>
-            Classic height / width / block sharding as four steps from
-            <code>TensorSpec</code> + <code>TensorLayout</code>, then
-            <code>Buffer</code> / <code>BufferDistributionSpec</code> for shard→core.
-            Default demo: logical <code>[2,3,5]</code> <code>TILE 2×2</code> → padded
-            <code>[2,4,6]</code> → physical <code>[8,6]</code> → block shards on a
-            <code>2×2</code> core grid. Step 1 is always the original logical input.
+            Arbitrary N-D sharding via <code>TensorSpec::sharded(NdShardSpec, ShardShapeAlignment)</code>.
+            Pad the logical tensor, align the shard shape, cut an N-D page grid into
+            N-D shards (no flatten), then distribute shards to cores
+            (<code>round_robin</code> or <code>grid_2d</code>). Default demo: logical
+            <code>[2,8,8]</code> <code>TILE 2×2</code>, shard <code>[2,4,4]</code> on a
+            <code>2×2</code> core grid → 4 shards of page-shape <code>[2,2,2]</code> (3D cubes).
         </p>
         <nav class="topnav">
             <a href="index.html">Overview</a>
             <a href="buffer.html">Buffer page-mapping</a>
             <a href="tensor.html">Tensor sharding</a>
             <a href="animated.html">Interleaved</a>
-            <a href="shard_2d_anim.html" class="active">2D sharding</a>
-            <a href="shard_nd_anim.html">ND sharding</a>
+            <a href="shard_2d_anim.html">2D sharding</a>
+            <a href="shard_nd_anim.html" class="active">ND sharding</a>
         </nav>
     </header>
 
@@ -598,20 +680,21 @@
             <div class="grp">Presets</div>
             <div class="field">
                 <div class="preset-btns" id="presets">
-                    <button type="button" data-preset="tile-block">Tile · block</button>
-                    <button type="button" data-preset="tile-block-explicit">Tile · block 4×3</button>
-                    <button type="button" data-preset="tile-block-z4">Tile · block · z=4</button>
-                    <button type="button" data-preset="tile-height">Tile · height</button>
-                    <button type="button" data-preset="tile-width">Tile · width</button>
-                    <button type="button" data-preset="rm-height">RM · height</button>
+                    <button type="button" data-preset="tile-3d">Tile · 3D shard</button>
+                    <button type="button" data-preset="tile-rr">Tile · RR</button>
+                    <button type="button" data-preset="tile-rr-pad">Tile · RR · pad</button>
+                    <button type="button" data-preset="tile-grid2d">Tile · grid 2D</button>
+                    <button type="button" data-preset="tile-align">Tile · align 1→2</button>
+                    <button type="button" data-preset="rm-nd">RM · ND</button>
+                    <button type="button" data-preset="rm-pad">RM · pad mid</button>
                 </div>
             </div>
 
             <div class="grp">Tensor</div>
             <div class="field">
                 <label>Logical shape</label>
-                <input id="logicalShape" value="2,3,5" />
-                <div class="hint">N-D, e.g. <code>2,3,5</code> or <code>64,96</code></div>
+                <input id="logicalShape" value="2,8,8" />
+                <div class="hint">N-D, e.g. <code>2,8,8</code> or <code>2,64,64</code></div>
             </div>
             <div class="field">
                 <label>Layout</label>
@@ -629,22 +712,11 @@
                 </div>
             </div>
 
-            <div class="grp">Sharding</div>
+            <div class="grp">ND sharding</div>
             <div class="field">
-                <label>Model</label>
-                <select id="sharding">
-                    <option value="block" selected>block</option>
-                    <option value="height">height</option>
-                    <option value="width">width</option>
-                </select>
-            </div>
-            <div class="field">
-                <label>Configure by</label>
-                <select id="configBy">
-                    <option value="grid" selected>Core grid</option>
-                    <option value="shape">Shard shape</option>
-                </select>
-                <div class="hint">Pick one — the other is derived (1 shard / core).</div>
+                <label>ND shard shape (elements)</label>
+                <input id="ndShardShape" value="2,4,4" />
+                <div class="hint">N-D, ≤ tensor rank. Rank-3 shards render as rotatable cubes.</div>
             </div>
             <div class="field" id="gridField">
                 <label>Core grid</label>
@@ -653,17 +725,27 @@
                     <span>×</span>
                     <input id="gridY" type="number" min="1" value="2" />
                 </div>
-                <div class="hint" id="gridHint">Sets how many cores; shard shape is even-split auto.</div>
+                <div class="hint" id="gridHint">Banks that receive shards (<code>NdShardSpec.grid</code>).</div>
             </div>
-            <div class="field" id="shardDimField">
-                <label>Shard shape (elem)</label>
-                <div class="row2">
-                    <input id="shardH" type="number" min="1" placeholder="H" title="Shard height (elements)" />
-                    <span>×</span>
-                    <input id="shardW" type="number" min="1" placeholder="W" title="Shard width (elements)" />
+            <div class="field">
+                <label>Distribution</label>
+                <select id="ndStrategy">
+                    <option value="round_robin" selected>round_robin (1D)</option>
+                    <option value="grid_2d">grid (2D)</option>
+                </select>
+                <div class="hint" id="stratHint">
+                    <code>ShardDistributionStrategy</code> — round-robin stacks shards; grid_2d needs a rank-2 shard grid.
                 </div>
-                <div class="hint" id="shardHint">
-                    Height: H; width: W; block: H×W. Core grid is derived from physical ÷ shard.
+            </div>
+            <div class="field">
+                <label>Shard-shape alignment</label>
+                <select id="ndAlignment">
+                    <option value="REQUIRED" selected>REQUIRED</option>
+                    <option value="RECOMMENDED">RECOMMENDED</option>
+                    <option value="NONE">NONE</option>
+                </select>
+                <div class="hint" id="ndAlignHint">
+                    <code>TensorSpec::ShardShapeAlignment</code> — rounds the trailing shard dims up to the layout alignment.
                 </div>
             </div>
             <div class="field">
@@ -673,26 +755,25 @@
                     <option value="col_major">col_major</option>
                 </select>
                 <div class="hint" id="orientHint">
-                    How the shard grid maps onto the core grid (and auto-split for block).
+                    Orders cores for round-robin / maps shard (r,c) → core for grid_2d.
                 </div>
             </div>
             <div class="field">
-                <label>Alignment</label>
+                <label>Tensor alignment</label>
                 <select id="alignMode">
                     <option value="default" selected>default</option>
-                    <option value="shard_shape">shard shape</option>
                     <option value="custom">custom</option>
                 </select>
                 <div class="hint" id="alignHint">
-                    <code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row/shard width).
+                    <code>Alignment{}</code> → <code>create_default_alignment</code> (pads the tensor, not the shard).
                 </div>
             </div>
             <div class="field" id="customAlignField" style="display:none">
                 <label>Custom alignment</label>
-                <input id="alignment" placeholder="e.g. 4,4" />
+                <input id="alignment" placeholder="e.g. 1,3,2" />
                 <div class="hint">
                     Passed as <code>TensorLayout(..., alignment)</code>; merged via
-                    <code>initialize_alignment</code> (each dim rounded up to the layout default).
+                    <code>initialize_alignment</code>.
                 </div>
             </div>
             <label class="toggle" title="Rank-3 padded shape as a rotatable cube of layers (same as tensor sharding)">
@@ -709,7 +790,7 @@
                 <button id="btnPrev">← Prev</button>
                 <button id="btnNext" class="primary">Next →</button>
                 <button id="btnPlay">Play</button>
-                <span class="state-label">Step <strong id="stateNum">1</strong> / <span id="stateTotal">6</span> — <span id="stateName">input</span></span>
+                <span class="state-label">Step <strong id="stateNum">1</strong> / <span id="stateTotal">4</span> — <span id="stateName">input</span></span>
                 <div class="dots" id="dots" aria-hidden="true"></div>
             </div>
 
@@ -745,24 +826,24 @@
     const colorFor = (i) => PALETTE[i % PALETTE.length];
 
     const PRESETS = {
-        "tile-block":  { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block",  configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
-        "tile-block-explicit": { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block", configBy: "shape", gridX: 2, gridY: 2, shardH: "4", shardW: "3", alignMode: "default" },
-        "tile-block-z4": { logicalShape: "4,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "block", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
-        "tile-height": { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "height", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
-        "tile-width":  { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, sharding: "width",  configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
-        "rm-height":   { logicalShape: "2,3,5", layout: "ROW_MAJOR", tileH: 2, tileW: 2, sharding: "height", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
+        "tile-3d":      { logicalShape: "2,8,8", layout: "TILE", tileH: 2, tileW: 2, ndShardShape: "2,4,4", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "default" },
+        "tile-rr":      { logicalShape: "2,4,4", layout: "TILE", tileH: 2, tileW: 2, ndShardShape: "1,2,2", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "default" },
+        "tile-rr-pad":  { logicalShape: "2,3,5", layout: "TILE", tileH: 2, tileW: 2, ndShardShape: "1,2,2", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "default" },
+        "tile-grid2d":  { logicalShape: "4,4", layout: "TILE", tileH: 2, tileW: 2, ndShardShape: "2,2", gridX: 2, gridY: 2, ndStrategy: "grid_2d", ndAlignment: "REQUIRED", alignMode: "default" },
+        "tile-align":   { logicalShape: "2,4,4", layout: "TILE", tileH: 2, tileW: 2, ndShardShape: "1,1,1", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "default" },
+        "rm-nd":        { logicalShape: "2,4,4", layout: "ROW_MAJOR", tileH: 2, tileW: 2, ndShardShape: "1,2,2", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "default" },
+        "rm-pad":       { logicalShape: "3,7,3", layout: "ROW_MAJOR", tileH: 2, tileW: 2, ndShardShape: "1,3,2", gridX: 2, gridY: 2, ndStrategy: "round_robin", ndAlignment: "REQUIRED", alignMode: "custom", alignment: "1,3,2" },
     };
 
-    // Full walkthrough catalog. Align / flatten(+compare) are included only when
-    // needed (see rebuildWalkthrough).
+    // Walkthrough catalog. Pad / shard-align steps are included only when needed
+    // (see rebuildWalkthrough). No flatten — ND keeps the N-D page grid.
     const ALL_STEPS = [
-        { id: "input",   name: "input",    title: "① Input — logical shape" },
-        { id: "align",   name: "align",    title: "② Align — logical → padded", needsPad: true },
-        { id: "flatten", name: "flatten",  title: "③ Flatten — ND → 2D", needsFlatten: true },
-        { id: "compare", name: "compare",  title: "③½ Before / after squash", needsFlatten: true },
-        { id: "slice",   name: "slice",    title: "④ Slice — 2D → shards" },
-        { id: "map",     name: "map",      title: "⑤ Map — shards → cores" },
-        { id: "coremap", name: "core map", title: "⑥ Result — tensor colored by core" },
+        { id: "input",      name: "input",       title: "① Input — logical shape" },
+        { id: "align",      name: "align",       title: "② Align — logical → padded", needsPad: true },
+        { id: "shardalign", name: "shard align", title: "③ Shard align — ShardShapeAlignment", needsShardAlign: true },
+        { id: "slice",      name: "slice",       title: "④ Slice — ND → shards" },
+        { id: "map",        name: "map",         title: "⑤ Map — shards → cores" },
+        { id: "coremap",    name: "core map",    title: "⑥ Result — tensor colored by core" },
     ];
 
     let STATES = ALL_STEPS.slice();
@@ -772,7 +853,7 @@
     let meta = null;
     let state = 0;
     let padStepEnabled = true;
-    let flattenStepEnabled = true;
+    let shardAlignStepEnabled = true;
     let playing = false;
     let playTimer = null;
     let dealToken = 0;
@@ -791,16 +872,15 @@
         layout: document.getElementById("layout"),
         tileH: document.getElementById("tileH"),
         tileW: document.getElementById("tileW"),
-        sharding: document.getElementById("sharding"),
-        configBy: document.getElementById("configBy"),
+        ndShardShape: document.getElementById("ndShardShape"),
         gridField: document.getElementById("gridField"),
         gridX: document.getElementById("gridX"),
         gridY: document.getElementById("gridY"),
         gridHint: document.getElementById("gridHint"),
-        shardDimField: document.getElementById("shardDimField"),
-        shardH: document.getElementById("shardH"),
-        shardW: document.getElementById("shardW"),
-        shardHint: document.getElementById("shardHint"),
+        ndStrategy: document.getElementById("ndStrategy"),
+        stratHint: document.getElementById("stratHint"),
+        ndAlignment: document.getElementById("ndAlignment"),
+        ndAlignHint: document.getElementById("ndAlignHint"),
         orientation: document.getElementById("orientation"),
         orientHint: document.getElementById("orientHint"),
         alignMode: document.getElementById("alignMode"),
@@ -835,11 +915,13 @@
         return !shapesEqual(res.logicalShape, res.paddedShape);
     }
 
-    // Flatten (+ before/after compare) only when the tensor is still ND.
-    function needsFlattenStep(res) {
-        const lr = (res.logicalShape || []).length;
-        const pr = (res.paddedShape || []).length;
-        return Math.max(lr, pr) > 2;
+    // Shard-align step when ShardShapeAlignment actually grows the requested shard.
+    function needsShardAlignStep(res) {
+        const req = res.cfg && res.cfg.requestedNdShardShape;
+        const got = res.ndShardShape;
+        if (!req || !got) return false;
+        if (req.length !== got.length) return true;
+        return req.some((v, i) => v !== got[i]);
     }
 
     function stepId(idx) {
@@ -851,31 +933,31 @@
         return STATES.findIndex((s) => s.id === id);
     }
 
-    // Rebuild STATES / labels / dots from pad + flatten flags.
+    // Rebuild STATES / labels / dots from pad + shard-align flags.
     function rebuildWalkthrough({ keepId } = {}) {
         const prevId = keepId || stepId();
         padStepEnabled = !!(result && needsPaddingStep(result));
-        flattenStepEnabled = !!(result && needsFlattenStep(result));
+        shardAlignStepEnabled = !!(result && needsShardAlignStep(result));
         STATES = ALL_STEPS.filter((s) =>
             (!s.needsPad || padStepEnabled) &&
-            (!s.needsFlatten || flattenStepEnabled));
+            (!s.needsShardAlign || shardAlignStepEnabled));
 
         // Renumber display labels for the active subset.
-        // Key = `${pad?1:0}${flatten?1:0}`
+        // Key = `${pad?1:0}${shardAlign?1:0}`
         const labelTables = {
-            "11": { // pad + flatten (full)
-                input: "1", align: "2", flatten: "3", compare: "3.5",
+            "11": {
+                input: "1", align: "2", shardalign: "3",
                 slice: "4", map: "5", coremap: "6",
             },
-            "01": { // no pad, flatten
-                input: "1", flatten: "2", compare: "2.5",
+            "01": {
+                input: "1", shardalign: "2",
                 slice: "3", map: "4", coremap: "5",
             },
-            "10": { // pad, already 2D (no flatten)
+            "10": {
                 input: "1", align: "2",
                 slice: "3", map: "4", coremap: "5",
             },
-            "00": { // no pad, already 2D
+            "00": {
                 input: "1",
                 slice: "2", map: "3", coremap: "4",
             },
@@ -884,27 +966,26 @@
             "11": null, // use ALL_STEPS titles
             "01": {
                 input: "① Input — logical shape",
-                flatten: "② Flatten — ND → 2D",
-                compare: "②½ Before / after squash",
-                slice: "③ Slice — 2D → shards",
+                shardalign: "② Shard align — ShardShapeAlignment",
+                slice: "③ Slice — ND → shards",
                 map: "④ Map — shards → cores",
                 coremap: "⑤ Result — tensor colored by core",
             },
             "10": {
                 input: "① Input — logical shape",
                 align: "② Align — logical → padded",
-                slice: "③ Slice — 2D → shards",
+                slice: "③ Slice — ND → shards",
                 map: "④ Map — shards → cores",
                 coremap: "⑤ Result — tensor colored by core",
             },
             "00": {
                 input: "① Input — logical shape",
-                slice: "② Slice — 2D → shards",
+                slice: "② Slice — ND → shards",
                 map: "③ Map — shards → cores",
                 coremap: "④ Result — tensor colored by core",
             },
         };
-        const key = `${padStepEnabled ? 1 : 0}${flattenStepEnabled ? 1 : 0}`;
+        const key = `${padStepEnabled ? 1 : 0}${shardAlignStepEnabled ? 1 : 0}`;
         const lab = labelTables[key];
         const titles = titleTables[key];
         STEP_LABELS = STATES.map((s) => lab[s.id] || s.id);
@@ -926,9 +1007,9 @@
         // Restore position by step id when possible.
         let next = indexOfStep(prevId);
         if (next < 0) {
-            // Skipped step → land on the next still-active stage.
             const fallback =
-                prevId === "align" ? ["flatten", "slice"] :
+                prevId === "align" ? ["shardalign", "slice"] :
+                prevId === "shardalign" ? ["slice"] :
                 (prevId === "flatten" || prevId === "compare") ? ["slice"] :
                 [];
             next = 0;
@@ -956,141 +1037,56 @@
         return n;
     }
 
-    function basePhysical(logicalShape, layout, tile, alignment) {
-        const TM = TensorMapping;
-        const pc = TM.pageConfig(layout, tile);
-        const mem = {
-            bufferType: "L1", memoryLayout: "INTERLEAVED",
-            shardSpec: null, ndShardSpec: null, createdWithNd: false,
-        };
-        const spec = TM.makeSpec(logicalShape, TM.makeLayout("BFLOAT16", pc, mem, alignment || []));
-        return spec.physical;
-    }
-
-    // Factor n cores into an X×Y grid closest to square (prefer wider: x ≥ y).
-    function nearestSquareGrid(n) {
-        const nCores = Math.max(1, n | 0);
-        let best = { x: nCores, y: 1 };
-        let bestScore = nCores - 1;
-        for (let y = 1; y * y <= nCores; y++) {
-            if (nCores % y !== 0) continue;
-            const x = nCores / y;
-            const score = Math.abs(x - y);
-            if (score < bestScore) {
-                best = { x, y };
-                bestScore = score;
-            }
-        }
-        return best;
-    }
-
-    // Inverse of even-split: one shard per core covering the physical tensor.
-    // Height/width (round-robin 1D): pack cores into a near-square grid.
-    // Block (grid_2d): core grid must match the 2D shard tiling + orientation.
-    function gridFromShardShape(sharding, physical, shardHeight, shardWidth, orientation) {
-        const [pH, pW] = physical;
-        const rowMajor = orientation !== "col_major";
-        if (sharding === "height") {
-            if (!(shardHeight > 0)) throw new Error("shard height required when configuring by shape");
-            return nearestSquareGrid(TensorMapping.divUp(pH, shardHeight));
-        }
-        if (sharding === "width") {
-            if (!(shardWidth > 0)) throw new Error("shard width required when configuring by shape");
-            return nearestSquareGrid(TensorMapping.divUp(pW, shardWidth));
-        }
-        // block: shard rows = ⌈H/sh⌉, shard cols = ⌈W/sw⌉
-        // row_major cores need (x=cols, y=rows); col_major needs (x=rows, y=cols)
-        if (!(shardHeight > 0) || !(shardWidth > 0)) {
-            throw new Error("shard H×W required when configuring by shape");
-        }
-        const rows = TensorMapping.divUp(pH, shardHeight);
-        const cols = TensorMapping.divUp(pW, shardWidth);
-        return rowMajor ? { x: cols, y: rows } : { x: rows, y: cols };
-    }
-
     function readAlignMode() {
-        const m = dom.alignMode.value;
-        if (m === "shard_shape" || m === "custom") return m;
-        return "default";
+        return dom.alignMode.value === "custom" ? "custom" : "default";
     }
+
 
     function readCfg() {
         const logicalShape = parseInts(dom.logicalShape.value);
-        if (logicalShape.length < 2) throw new Error("logical shape needs rank ≥ 2");
+        if (logicalShape.length < 1) throw new Error("logical shape needs rank ≥ 1");
         const layout = dom.layout.value;
         const tile = [Number(dom.tileH.value) || 2, Number(dom.tileW.value) || 2];
-        const sharding = dom.sharding.value;
-        const configBy = dom.configBy.value === "shape" ? "shape" : "grid";
+        const ndShardShape = parseInts(dom.ndShardShape.value);
+        if (!ndShardShape.length) throw new Error("ND shard shape required");
+        if (ndShardShape.length > logicalShape.length) {
+            throw new Error("ND shard shape rank cannot exceed tensor rank");
+        }
+        const grid = { x: Number(dom.gridX.value) || 1, y: Number(dom.gridY.value) || 1 };
+        if (grid.x < 1 || grid.y < 1) throw new Error("core grid dims must be ≥ 1");
+        const ndStrategy = dom.ndStrategy.value === "grid_2d" ? "grid_2d" : "round_robin";
+        const ndAlignment = ["NONE", "REQUIRED", "RECOMMENDED"].includes(dom.ndAlignment.value)
+            ? dom.ndAlignment.value
+            : "REQUIRED";
         const orientation = dom.orientation.value === "col_major" ? "col_major" : "row_major";
         const alignMode = readAlignMode();
-        // Custom is parsed here; shard_shape is resolved after a provisional map
-        // (needs the effective nd shard shape). Default → empty Alignment{}.
         let alignment = [];
         if (alignMode === "custom") {
             const alignStr = dom.alignment.value.trim();
-            if (!alignStr) throw new Error("custom alignment needs a value, e.g. 4,4");
+            if (!alignStr) throw new Error("custom alignment needs a value, e.g. 1,3,2");
             alignment = parseInts(alignStr);
         }
 
-        let grid;
-        let shardHeight = 0;
-        let shardWidth = 0;
-
-        if (configBy === "grid") {
-            grid = { x: Number(dom.gridX.value) || 1, y: Number(dom.gridY.value) || 1 };
-            if (grid.x < 1 || grid.y < 1) throw new Error("core grid dims must be ≥ 1");
-            shardHeight = 0;
-            shardWidth = 0;
-        } else {
-            if (sharding === "height" || sharding === "block") {
-                shardHeight = readOptionalPositive(dom.shardH);
-                if (!shardHeight) throw new Error("shard height required when configuring by shape");
-            }
-            if (sharding === "width" || sharding === "block") {
-                shardWidth = readOptionalPositive(dom.shardW);
-                if (!shardWidth) throw new Error("shard width required when configuring by shape");
-            }
-            // Shape→grid uses physical under the alignment that will actually apply.
-            // For shard_shape mode, provisional physical uses default alignment.
-            const physical = basePhysical(logicalShape, layout, tile, alignment);
-            // Provisional grid (enough cores). Height/width are reshaped to a
-            // near-square after mapping once the aligned shard count is known.
-            grid = gridFromShardShape(sharding, physical, shardHeight, shardWidth, orientation);
-            dom.gridX.value = String(grid.x);
-            dom.gridY.value = String(grid.y);
-        }
-
         return {
-            logicalShape, layout, tile, sharding, grid, configBy, orientation,
-            dtype: "BFLOAT16", alignMode, alignment,
-            shardHeight, shardWidth,
+            logicalShape,
+            layout,
+            tile,
+            sharding: "nd",
+            grid,
+            orientation,
+            dtype: "BFLOAT16",
+            alignMode,
+            alignment,
+            ndShardShape,
+            requestedNdShardShape: ndShardShape.slice(),
+            ndStrategy,
+            ndAlignment,
         };
     }
 
-    // Resolve TensorLayout Alignment for the three UI modes.
-    // shard_shape: use the effective 2D shard (elements) from a provisional map.
     function resolveAlignment(cfg) {
         if (cfg.alignMode === "custom") return cfg.alignment.slice();
-        if (cfg.alignMode !== "shard_shape") return [];
-        const provisional = TensorMapping.computeTensorMapping({ ...cfg, alignment: [] });
-        const nd = provisional.ndShardShape;
-        if (!nd || nd.length < 2) {
-            throw new Error("shard-shape alignment needs a 2D shard shape");
-        }
-        return nd.slice(-2);
-    }
-
-    // After compute: for height/width shape-mode, pack cores into nearest square
-    // using the real shard count (post tile/alignment), not the pre-align guess.
-    function refineShapeModeGrid(cfg, res) {
-        if (cfg.configBy !== "shape") return { cfg, res };
-        if (cfg.sharding !== "height" && cfg.sharding !== "width") return { cfg, res };
-        const ideal = nearestSquareGrid(res.mapping.numShards);
-        if (ideal.x === cfg.grid.x && ideal.y === cfg.grid.y) return { cfg, res };
-        const next = { ...cfg, grid: ideal };
-        dom.gridX.value = String(ideal.x);
-        dom.gridY.value = String(ideal.y);
-        return { cfg: next, res: TensorMapping.computeTensorMapping(next) };
+        return [];
     }
 
     function applyPreset(name) {
@@ -1100,18 +1096,17 @@
         dom.layout.value = p.layout;
         dom.tileH.value = p.tileH;
         dom.tileW.value = p.tileW;
-        dom.sharding.value = p.sharding;
-        dom.configBy.value = p.configBy || "grid";
+        dom.ndShardShape.value = p.ndShardShape;
         dom.gridX.value = p.gridX;
         dom.gridY.value = p.gridY;
-        dom.shardH.value = p.shardH != null ? p.shardH : "";
-        dom.shardW.value = p.shardW != null ? p.shardW : "";
+        dom.ndStrategy.value = p.ndStrategy || "round_robin";
+        dom.ndAlignment.value = p.ndAlignment || "REQUIRED";
         dom.orientation.value = p.orientation || "row_major";
         dom.alignMode.value = p.alignMode || "default";
         dom.alignment.value = p.alignment || "";
         syncTileField();
-        syncConfigMode();
         syncAlignMode();
+        syncNdHints();
         recompute();
     }
 
@@ -1121,108 +1116,71 @@
         dom.tileOnly.style.pointerEvents = dom.layout.value === "TILE" ? "" : "none";
     }
 
-    // Mutually exclusive: edit core grid XOR shard shape; the other is derived.
-    function syncConfigMode() {
-        const byShape = dom.configBy.value === "shape";
-        const sm = dom.sharding.value;
-        const showH = sm === "height" || sm === "block";
-        const showW = sm === "width" || sm === "block";
-
-        dom.gridField.classList.toggle("mode-off", byShape);
-        dom.gridField.classList.toggle("mode-on", !byShape);
-        dom.shardDimField.classList.toggle("mode-off", !byShape);
-        dom.shardDimField.classList.toggle("mode-on", byShape);
-
-        dom.gridX.readOnly = byShape;
-        dom.gridY.readOnly = byShape;
-
-        if (!byShape) {
-            dom.shardH.value = "";
-            dom.shardW.value = "";
-            dom.shardH.readOnly = true;
-            dom.shardW.readOnly = true;
-            dom.shardH.style.opacity = "";
-            dom.shardW.style.opacity = "";
-            dom.gridHint.textContent = "Editable — shard shape is even-split auto (1 shard/core).";
-            if (sm === "height") {
-                dom.shardHint.textContent = "Derived after Apply from physical height ÷ (grid X×Y).";
-            } else if (sm === "width") {
-                dom.shardHint.textContent = "Derived after Apply from physical width ÷ (grid X×Y).";
-            } else {
-                const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
-                dom.shardHint.textContent = orient === "col_major"
-                    ? "Derived after Apply: H = physH÷gridX, W = physW÷gridY (col_major)."
-                    : "Derived after Apply: H = physH÷gridY, W = physW÷gridX (row_major).";
-            }
-        } else {
-            dom.shardH.readOnly = !showH;
-            dom.shardW.readOnly = !showW;
-            if (!showH) dom.shardH.value = "";
-            if (!showW) dom.shardW.value = "";
-            dom.shardH.style.opacity = showH ? "" : ".35";
-            dom.shardW.style.opacity = showW ? "" : ".35";
-            dom.gridHint.textContent = "Derived after Apply from physical ÷ shard shape.";
-            if (sm === "height") {
-                dom.shardHint.textContent = "Set shard height (elements). Core grid = nearest square for ⌈physH/H⌉ cores.";
-            } else if (sm === "width") {
-                dom.shardHint.textContent = "Set shard width (elements). Core grid = nearest square for ⌈physW/W⌉ cores.";
-            } else {
-                const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
-                dom.shardHint.textContent = orient === "col_major"
-                    ? "Set shard H×W. Core grid = ⌈physH/H⌉ × ⌈physW/W⌉ (col_major)."
-                    : "Set shard H×W. Core grid = ⌈physW/W⌉ × ⌈physH/H⌉ (row_major).";
-            }
-        }
-        if (dom.orientHint) {
-            const orient = dom.orientation.value === "col_major" ? "col_major" : "row_major";
-            if (sm === "block") {
-                dom.orientHint.textContent = orient === "col_major"
-                    ? "Block: shard (r,c) → core (r,c); auto-split uses gridX for height."
-                    : "Block: shard (r,c) → core (c,r); auto-split uses gridY for height.";
-            } else {
-                dom.orientHint.textContent = "Orders the core list for round-robin (height/width).";
-            }
-        }
-    }
-
     function syncAlignMode() {
         const mode = readAlignMode();
         dom.customAlignField.style.display = mode === "custom" ? "" : "none";
         if (mode === "default") {
             dom.alignHint.innerHTML =
-                `<code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row/shard width).`;
-        } else if (mode === "shard_shape") {
-            dom.alignHint.innerHTML =
-                `Use the effective shard H×W as <code>TensorLayout</code> alignment (pads so the tensor divides into shards).`;
+                `<code>Alignment{}</code> → <code>create_default_alignment</code> (pads the tensor).`;
         } else {
-            dom.alignHint.innerHTML =
-                `Enter a custom <code>Alignment</code> below.`;
+            dom.alignHint.innerHTML = `Enter a custom <code>Alignment</code> below.`;
         }
         if (result) {
             const on = needsPaddingStep(result);
             dom.alignHint.innerHTML += on
-                ? ` <span style="color:var(--accent)">Align step enabled</span> (logical ≠ padded).`
-                : ` <span style="opacity:.8">No padding — align step skipped.</span>`;
+                ? ` <span style="color:var(--accent)">Pad step enabled</span> (logical ≠ padded).`
+                : ` <span style="opacity:.8">No tensor padding — pad step skipped.</span>`;
+        }
+    }
+
+    function syncNdHints() {
+        const strat = dom.ndStrategy.value;
+        if (dom.stratHint) {
+            dom.stratHint.textContent = strat === "grid_2d"
+                ? "grid_2d: shard-grid (r,c) maps onto the core grid (needs rank-2 shard grid after squeeze)."
+                : "round_robin: shard i → core (i % numCores), stacked by floor(i / numCores).";
+        }
+        const nda = dom.ndAlignment.value;
+        if (dom.ndAlignHint) {
+            if (nda === "NONE") {
+                dom.ndAlignHint.textContent = "NONE — shard shape must already satisfy layout alignment or mapping throws.";
+            } else if (nda === "RECOMMENDED") {
+                dom.ndAlignHint.innerHTML =
+                    `RECOMMENDED — round trailing shard dims up to recommended alignment (e.g. 64B / dtype for RM).`;
+            } else {
+                dom.ndAlignHint.innerHTML =
+                    `REQUIRED — round trailing shard dims up to the layout minimum (tile size in TILE).`;
+            }
+        }
+        if (dom.orientHint) {
+            dom.orientHint.textContent = strat === "grid_2d"
+                ? (dom.orientation.value === "col_major"
+                    ? "grid_2d col_major: shard (r,c) → core (r,c)."
+                    : "grid_2d row_major: shard (r,c) → core (c,r).")
+                : "Orders the core list for round-robin assignment.";
         }
     }
 
     function syncDerivedHints(res) {
         if (!res) return;
         const nd = res.ndShardShape;
+        const req = res.cfg && res.cfg.requestedNdShardShape;
         const g = res.cfg.grid;
-        if (res.cfg.configBy === "grid" && nd) {
-            dom.shardH.placeholder = String(nd[nd.length - 2]);
-            dom.shardW.placeholder = String(nd[nd.length - 1]);
-            dom.shardHint.textContent =
-                `Derived shard shape [${nd.join(",")}] from core grid ${g.x}×${g.y}.`;
-        } else if (res.cfg.configBy === "shape") {
+        if (dom.gridHint) {
             dom.gridHint.textContent =
-                `Derived core grid ${g.x}×${g.y} from shard shape` +
-                (nd ? ` [${nd.join(",")}]` : "") + `.`;
-            if (nd) {
-                dom.shardH.placeholder = String(nd[nd.length - 2]);
-                dom.shardW.placeholder = String(nd[nd.length - 1]);
-            }
+                `Core grid ${g.x}×${g.y} · ${res.mapping.numShards} shards` +
+                (nd ? ` of shape [${nd.join(",")}]` : "") +
+                (req && needsShardAlignStep(res) ? ` (requested [${req.join(",")}])` : "") +
+                `.`;
+        }
+        syncNdHints();
+        if (dom.ndAlignHint && needsShardAlignStep(res)) {
+            dom.ndAlignHint.innerHTML +=
+                ` <span style="color:#ffa657">Shard-align step enabled</span>` +
+                ` ([${req.join(",")}] → [${nd.join(",")}]).`;
+        } else if (dom.ndAlignHint && result) {
+            dom.ndAlignHint.innerHTML +=
+                ` <span style="opacity:.8">No shard growth — shard-align step skipped.</span>`;
         }
     }
 
@@ -1311,6 +1269,7 @@
         } else if (colored && !pad) {
             cell.classList.add("colored");
             const col = colorFor(coreId);
+            cell.style.setProperty("--cell-fill", col);
             cell.style.background = col;
             cell.style.borderColor = col;
         }
@@ -1411,6 +1370,7 @@
     }
 
     function makePageEl(pageId, opts) {
+        opts = opts || {};
         const pr = Math.floor(pageId / meta.pagesW);
         const pc = pageId % meta.pagesW;
         const page = document.createElement("div");
@@ -1423,70 +1383,171 @@
                 const r = pr * meta.ph + dr;
                 const c = pc * meta.pw + dc;
                 if (r >= meta.H || c >= meta.W) continue;
-                page.appendChild(makeCell(r, c, opts));
+                // Shard / page tiles: color + hover title only — coord text is unreadable at this density.
+                page.appendChild(makeCell(r, c, { ...opts, noLabel: true }));
             }
         }
         return page;
     }
 
     function shardElemShape(shard) {
-        // Nominal shard shape in elements — the tile size every shard is cut to
-        // (including overhang padding on ragged edges). Do not use the filled
-        // page span: a last-column shard of shape [4,4] on physical width 6 still
-        // has W=4, with only 2 columns of real data.
-        if (result.ndShardShape && result.ndShardShape.length >= 2) {
-            return result.ndShardShape.slice(-2);
+        // Nominal shard shape in elements (NdShardSpec.shard_shape after alignment).
+        if (result.ndShardShape && result.ndShardShape.length) {
+            return result.ndShardShape.slice();
         }
-        const [sh, sw] = shard.shape.length >= 2 ? shard.shape.slice(-2) : [1, shard.shape[0] || 1];
-        return [sh * meta.ph, sw * meta.pw];
+        const shapePages = shard.shape.length ? shard.shape : [1];
+        const out = shapePages.slice();
+        if (out.length >= 1) out[out.length - 1] *= meta.pw;
+        if (out.length >= 2) out[out.length - 2] *= meta.ph;
+        return out;
+    }
+
+    function makePadPageEl() {
+        const ph = document.createElement("div");
+        ph.className = "page";
+        ph.style.gridTemplateColumns = `repeat(${meta.pw}, var(--cell-w))`;
+        ph.style.gridTemplateRows = `repeat(${meta.ph}, var(--cell-h))`;
+        for (let k = 0; k < meta.ph * meta.pw; k++) {
+            const cell = document.createElement("div");
+            cell.className = "cell pad";
+            // No glyph — shard tiles stay uncluttered; title carries detail.
+            cell.title = "padding";
+            ph.appendChild(cell);
+        }
+        return ph;
+    }
+
+    // Normalize shard.shape (pages) to rank-3 [d0,d1,d2] for cube layout.
+    function shardShapeAs3d(shape) {
+        const s = (shape && shape.length) ? shape.slice() : [1];
+        if (s.length >= 3) {
+            if (s.length === 3) return s;
+            const lead = s.slice(0, -2).reduce((a, b) => a * b, 1);
+            return [lead, s[s.length - 2], s[s.length - 1]];
+        }
+        if (s.length === 2) return [1, s[0], s[1]];
+        return [1, 1, s[0] || 1];
+    }
+
+    // Rank-3 (or higher) shard → rotatable cube of pages (same idea as tensor.html).
+    function buildShardPageCube(shard, opts) {
+        const [d0, d1, d2] = shardShapeAs3d(shard.shape);
+        const cw = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell-w")) || 28;
+        const ch = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell-h")) || 22;
+        const pageH = meta.ph * ch + (meta.ph - 1) * 2 + 8;
+        const pageW = meta.pw * cw + (meta.pw - 1) * 2 + 8;
+        const compact = !!opts.compact;
+        const planeGap = Math.max(compact ? 48 : 64, Math.max(pageH, pageW * 0.55) + 18);
+
+        const stage = document.createElement("div");
+        stage.className = "cube-stage shard-cube" + (compact ? " small" : "");
+        stage.style.setProperty("--shard-color", opts.shardColor || "var(--accent)");
+        const scene = document.createElement("div");
+        scene.className = "cube-scene";
+        scene.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        cubeScenes.push(scene);
+
+        for (let z = 0; z < d0; z++) {
+            const plane = document.createElement("div");
+            plane.className = "cube-plane";
+            plane.dataset.z = String(z);
+            // Slight brightness shift per z so overlapping planes don't melt together.
+            const zBright = 1 + (z - (d0 - 1) / 2) * 0.12;
+            plane.style.filter = `brightness(${zBright.toFixed(3)})`;
+            plane.style.transform =
+                `translate(-50%, -50%) translateZ(${(z - (d0 - 1) / 2) * planeGap}px)`;
+            const lab = document.createElement("div");
+            lab.className = "cube-plane-label";
+            lab.textContent = `z = ${z}`;
+            plane.appendChild(lab);
+            const grid = document.createElement("div");
+            grid.className = "cells";
+            grid.style.gridTemplateColumns = `repeat(${d2}, max-content)`;
+            for (let y = 0; y < d1; y++) {
+                for (let x = 0; x < d2; x++) {
+                    const off = z * d1 * d2 + y * d2 + x;
+                    const pid = shard.pages[off];
+                    const slot = pid == null ? makePadPageEl() : makePageEl(pid, opts);
+                    slot.title = (slot.title ? slot.title + "\n" : "") +
+                        `shard ${shard.id} local [${z},${y},${x}] slot ${off}`;
+                    grid.appendChild(slot);
+                }
+            }
+            plane.appendChild(grid);
+            scene.appendChild(plane);
+        }
+        stage.appendChild(scene);
+        const hint = document.createElement("div");
+        hint.className = "cube-hint";
+        hint.textContent = `pages [${d0}×${d1}×${d2}] · drag`;
+        stage.appendChild(hint);
+        stage.addEventListener("mousedown", (e) => {
+            dragging3d = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            e.stopPropagation();
+        });
+        return stage;
+    }
+
+    function shardWants3d(shard) {
+        if (dom.cube3d && !dom.cube3d.checked) return false;
+        const pagesRank = (shard.shape || []).length;
+        const elemRank = (result.ndShardShape || []).length;
+        // 3D when the page shard is rank-3, or the element NdShardSpec is rank-3.
+        return pagesRank >= 3 || elemRank >= 3;
     }
 
     function makeShardEl(shard, opts) {
+        opts = opts || {};
+        // Always fill shard cells by destination core — outline-only is illegible in 3D.
+        opts = { showPad: true, ...opts, colored: true };
         const el = document.createElement("div");
         el.className = "shard";
         el.dataset.shard = String(shard.id);
         const bank = meta.banks.find((b) => b.shardIds.includes(shard.id));
         const coreId = bank ? bank.bankId : shard.id % meta.numCores;
         el.dataset.core = String(coreId);
-        el.style.setProperty("--shard-color", colorFor(coreId));
-        const [sh, sw] = shard.shape.length >= 2 ? shard.shape.slice(-2) : [1, shard.shape[0] || 1];
-        el.style.gridTemplateColumns = `repeat(${sw}, max-content)`;
-        el.style.gridTemplateRows = `repeat(${sh}, max-content)`;
+        const shardColor = colorFor(coreId);
+        el.style.setProperty("--shard-color", shardColor);
 
         if (opts.showTag) {
-            const [eh, ew] = shardElemShape(shard);
+            const shape = shardElemShape(shard);
+            const eh = shape.length >= 2 ? shape[shape.length - 2] : 1;
+            const ew = shape.length ? shape[shape.length - 1] : 1;
             el.dataset.shapeH = String(eh);
             el.dataset.shapeW = String(ew);
+            el.dataset.shapeNd = shape.join(",");
             const dimH = document.createElement("span");
             dimH.className = "shard-dim shard-dim-h";
-            dimH.textContent = String(eh);
-            dimH.title = `shard height ${eh}`;
+            dimH.textContent = shape.length > 2 ? String(shape[0]) : String(eh);
+            dimH.title = `shard shape [${shape.join(",")}]`;
             const dimW = document.createElement("span");
             dimW.className = "shard-dim shard-dim-w";
-            dimW.textContent = String(ew);
-            dimW.title = `shard width ${ew}`;
+            dimW.textContent = shape.length > 2 ? shape.slice(1).join("×") : String(ew);
+            dimW.title = `shard shape [${shape.join(",")}]`;
             el.appendChild(dimH);
             el.appendChild(dimW);
         }
 
+        if (shardWants3d(shard)) {
+            el.classList.add("shard-3d");
+            el.appendChild(buildShardPageCube(shard, {
+                ...opts,
+                shardColor,
+                compact: !!opts.compact || !!opts.inCore,
+            }));
+            return el;
+        }
+
+        const [sh, sw] = shard.shape.length >= 2 ? shard.shape.slice(-2) : [1, shard.shape[0] || 1];
+        el.style.gridTemplateColumns = `repeat(${sw}, max-content)`;
+        el.style.gridTemplateRows = `repeat(${sh}, max-content)`;
+
         // Place pages in shard-local row-major; null = overhang padding slot
         for (let i = 0; i < shard.pages.length; i++) {
             const pid = shard.pages[i];
-            if (pid == null) {
-                const ph = document.createElement("div");
-                ph.className = "page";
-                ph.style.gridTemplateColumns = `repeat(${meta.pw}, var(--cell-w))`;
-                ph.style.gridTemplateRows = `repeat(${meta.ph}, var(--cell-h))`;
-                for (let k = 0; k < meta.ph * meta.pw; k++) {
-                    const cell = document.createElement("div");
-                    cell.className = "cell pad";
-                    cell.textContent = "·";
-                    ph.appendChild(cell);
-                }
-                el.appendChild(ph);
-            } else {
-                el.appendChild(makePageEl(pid, opts));
-            }
+            el.appendChild(pid == null ? makePadPageEl() : makePageEl(pid, opts));
         }
         return el;
     }
@@ -1658,53 +1719,109 @@
         );
     }
 
+    // Place one shard tile into a 2D CSS grid from its last two grid coords.
+    function placeShardInPlane(grid, shard, el, sH, sW) {
+        let sr, sc;
+        if (shard.gridCoord.length >= 2) {
+            [sr, sc] = shard.gridCoord.slice(-2);
+        } else {
+            const i = shard.gridCoord[0] != null ? shard.gridCoord[0] : shard.id;
+            // 1D shard grid: lay out as a row unless it is a full-width strip.
+            const sampleW = shard.shape.length ? shard.shape[shard.shape.length - 1] : 1;
+            const fullWidthStrip = sampleW >= (result.tensorShapeInPages.slice(-1)[0] || meta.pagesW);
+            [sr, sc] = fullWidthStrip ? [i, 0] : [0, i];
+        }
+        el.style.gridRow = String(sr + 1);
+        el.style.gridColumn = String(sc + 1);
+        grid.appendChild(el);
+    }
+
+    function makeShardPlaneGrid(shards, { colored, ghost, tight, pending, sH, sW }) {
+        const grid = document.createElement("div");
+        grid.className = "grid2d show-pages" + (tight ? "" : " sliced");
+        grid.style.gridTemplateColumns = `repeat(${sW}, max-content)`;
+        grid.style.gridTemplateRows = `repeat(${sH}, max-content)`;
+        for (const shard of shards) {
+            const el = makeShardEl(shard, { colored, showPad: true, showTag: true });
+            if (ghost) el.classList.add("ghost");
+            if (pending) el.classList.add("slice-pending");
+            else if (!tight) el.classList.add("shard-revealed");
+            placeShardInPlane(grid, shard, el, sH, sW);
+        }
+        return grid;
+    }
+
     // tight: start packed (no gaps) for the slice-open animation.
     // pending: mark shards as unrevealed until animateSlice lights them.
+    // ND shard grids of rank ≥ 3 are shown as a stack of 2D planes (leading dims).
     function buildSlicedView({ colored, ghost, tight, pending }) {
         const stack = dom.tensorStack;
         stack.innerHTML = "";
         cubeScenes.length = 0;
         stack.className = "nd-stack show-pages";
 
-        const grid = document.createElement("div");
-        grid.className = "grid2d show-pages" + (tight ? "" : " sliced");
-
-        // Arrange shards in their shard-grid positions. A squeezed 1D shard grid
-        // (classic height) is full-width strips → stack vertically; otherwise a
-        // 1D grid is laid out as a row (width-like).
         const sg = result.mapping.shardGrid;
-        const sample = meta.shards[0];
-        const sampleW = sample && sample.shape.length ? sample.shape[sample.shape.length - 1] : 1;
-        const fullWidthStrip = sampleW >= meta.pagesW;
         let sH, sW;
         if (sg.length >= 2) {
             sH = sg[sg.length - 2];
             sW = sg[sg.length - 1];
         } else {
+            const sample = meta.shards[0];
+            const sampleW = sample && sample.shape.length ? sample.shape[sample.shape.length - 1] : 1;
+            const pageLast = (result.tensorShapeInPages && result.tensorShapeInPages.length)
+                ? result.tensorShapeInPages[result.tensorShapeInPages.length - 1]
+                : meta.pagesW;
+            const fullWidthStrip = sampleW >= pageLast;
             sH = fullWidthStrip ? (sg[0] || 1) : 1;
             sW = fullWidthStrip ? 1 : (sg[0] || 1);
         }
-        grid.style.gridTemplateColumns = `repeat(${sW}, max-content)`;
-        grid.style.gridTemplateRows = `repeat(${sH}, max-content)`;
 
-        for (const shard of meta.shards) {
-            const el = makeShardEl(shard, { colored, showPad: true, showTag: true });
-            if (ghost) el.classList.add("ghost");
-            if (pending) el.classList.add("slice-pending");
-            else if (!tight) el.classList.add("shard-revealed");
-            let sr, sc;
-            if (shard.gridCoord.length >= 2) {
-                [sr, sc] = shard.gridCoord.slice(-2);
-            } else {
-                const i = shard.gridCoord[0] != null ? shard.gridCoord[0] : shard.id;
-                [sr, sc] = fullWidthStrip ? [i, 0] : [0, i];
-            }
-            el.style.gridRow = String(sr + 1);
-            el.style.gridColumn = String(sc + 1);
-            grid.appendChild(el);
+        if (sg.length <= 2) {
+            const grid = makeShardPlaneGrid(meta.shards, {
+                colored, ghost, tight, pending, sH, sW,
+            });
+            stack.appendChild(grid);
+            return grid;
         }
-        stack.appendChild(grid);
-        return grid;
+
+        // Rank ≥ 3: one labeled plane per leading-dim coordinate.
+        const lead = sg.slice(0, -2);
+        const planeVol = lead.reduce((a, b) => a * b, 1);
+        const wrap = document.createElement("div");
+        wrap.className = "nd-shard-planes";
+        let firstGrid = null;
+        for (let plane = 0; plane < planeVol; plane++) {
+            const block = document.createElement("div");
+            const lab = document.createElement("div");
+            lab.className = "nd-shard-plane-lab";
+            // Decode plane index into leading coords.
+            const coords = [];
+            let rest = plane;
+            for (let d = lead.length - 1; d >= 0; d--) {
+                coords[d] = rest % lead[d];
+                rest = Math.floor(rest / lead[d]);
+            }
+            lab.textContent = lead.length === 1
+                ? `z = ${coords[0]}  ·  shard plane [${coords.join(",")}]`
+                : `shard plane [${coords.join(",")}]`;
+            block.appendChild(lab);
+            const planeShards = meta.shards.filter((s) => {
+                const gc = s.gridCoord;
+                if (gc.length < sg.length) return false;
+                for (let i = 0; i < lead.length; i++) {
+                    if (gc[i] !== coords[i]) return false;
+                }
+                return true;
+            });
+            const grid = makeShardPlaneGrid(planeShards, {
+                colored, ghost, tight, pending, sH, sW,
+            });
+            if (!firstGrid) firstGrid = grid;
+            block.appendChild(grid);
+            wrap.appendChild(block);
+        }
+        stack.appendChild(wrap);
+        return firstGrid;
     }
 
     function shardElementBounds(shard) {
@@ -1724,125 +1841,163 @@
         return { r0, c0, r1, c1 };
     }
 
-    // Paint shard cut outlines onto the continuous physical 2D grid (from step 3).
+    // Paint shard cut outlines onto the padded ND view (cube or flat cells).
     async function paintCutPreview(token) {
-        const pageGrid = dom.tensorStack.querySelector(".flat-page-grid");
-        if (!pageGrid) return;
+        const root = dom.tensorStack;
         for (const shard of meta.shards) {
             if (token !== dealToken) return;
-            const bounds = shardElementBounds(shard);
-            if (!bounds) continue;
             const bank = meta.banks.find((b) => b.shardIds.includes(shard.id));
             const coreId = bank ? bank.bankId : shard.id % meta.numCores;
             const col = colorFor(coreId);
-            const { r0, c0, r1, c1 } = bounds;
-            for (let r = r0; r <= r1; r++) {
-                for (let c = c0; c <= c1; c++) {
-                    const cell = pageGrid.querySelector(`[data-r="${r}"][data-c="${c}"]`);
-                    if (!cell) continue;
-                    cell.classList.add("cut-preview");
-                    cell.style.setProperty("--shard-color", col);
+            const cells = root.querySelectorAll(`.cell[data-shard="${shard.id}"]`);
+            cells.forEach((cell) => {
+                cell.classList.add("cut-preview");
+                cell.style.setProperty("--shard-color", col);
+            });
+            // Fallback: mark by page membership when cells lack data-shard (rare).
+            if (!cells.length) {
+                for (const pid of shard.pages) {
+                    if (pid == null) continue;
+                    root.querySelectorAll(`.cell[data-page="${pid}"]`).forEach((cell) => {
+                        cell.classList.add("cut-preview");
+                        cell.style.setProperty("--shard-color", col);
+                    });
                 }
             }
-            await sleep(160);
+            await sleep(140);
         }
     }
 
-    // Step 4: continue from step 3's physical 2D → cut preview → gaps → reveal.
+    // Step: ShardShapeAlignment — requested vs effective NdShardSpec.shard_shape.
+    function buildShardAlignView() {
+        const stack = dom.tensorStack;
+        stack.innerHTML = "";
+        cubeScenes.length = 0;
+        stack.className = "";
+
+        const req = (result.cfg && result.cfg.requestedNdShardShape) || [];
+        const got = result.ndShardShape || [];
+        const mode = (result.cfg && result.cfg.ndAlignment) || "REQUIRED";
+        const tip = result.tensorShapeInPages || [];
+        const sip = result.shardShapeInPages || [];
+
+        const panel = document.createElement("div");
+        panel.className = "shard-align-panel";
+
+        const left = document.createElement("div");
+        left.className = "shard-align-card";
+        left.innerHTML =
+            `<h3>Requested shard</h3>` +
+            `<div class="big">[${req.join(", ")}]</div>` +
+            `<div class="note">NdShardSpec.shard_shape (elements)</div>`;
+
+        const arrow = document.createElement("div");
+        arrow.className = "shard-align-arrow";
+        arrow.textContent = "→";
+
+        const right = document.createElement("div");
+        right.className = "shard-align-card";
+        const changed = needsShardAlignStep(result);
+        right.innerHTML =
+            `<h3>After ${mode}</h3>` +
+            `<div class="big${changed ? " hot" : ""}">[${got.join(", ")}]</div>` +
+            `<div class="note">` +
+            (changed
+                ? `trailing dims rounded up · then pages <strong>[${sip.join(",")}]</strong>`
+                : `unchanged · pages <strong>[${sip.join(",")}]</strong>`) +
+            `</div>`;
+
+        const info = document.createElement("div");
+        info.className = "shard-align-card";
+        info.innerHTML =
+            `<h3>Page grid</h3>` +
+            `<div class="big">[${tip.join(", ")}]</div>` +
+            `<div class="note">convert_shape_to_pages(padded)` +
+            ` · shard grid [${(result.mapping.shardGrid || []).join(",")}]` +
+            ` · ${result.mapping.numShards} shards</div>`;
+
+        panel.appendChild(left);
+        panel.appendChild(arrow);
+        panel.appendChild(right);
+        panel.appendChild(info);
+        stack.appendChild(panel);
+
+        const note = document.createElement("p");
+        note.className = "slice-status";
+        note.style.marginTop = "16px";
+        note.innerHTML =
+            `Padded tensor <strong>[${result.paddedShape.join(",")}]</strong> stays N-D — ` +
+            `no flatten (classic 2D would fold to physical <strong>[${result.physical.join(",")}]</strong>).`;
+        stack.appendChild(note);
+    }
+
+    // Slice: start from padded ND (not flattened 2D) → cut preview → shard tiles.
     async function animateSlice() {
         const token = dealToken;
         const stack = dom.tensorStack;
-        setCompareFlash(null, false);
 
         const status = document.createElement("p");
         status.className = "slice-status";
 
-        const stage = stack.querySelector(".flatten-stage");
-        if (stage) {
-            // Handoff: drop the 3D column, keep the same physical 2D from flatten/compare.
-            stage.classList.remove("z-flashing");
-            stage.querySelectorAll(".z-flash").forEach((el) => el.classList.remove("z-flash"));
-
-            const kids = [...stage.children];
-            const left = kids[0];
-            const arrow = kids[1];
-            const right = kids[2];
-
-            status.innerHTML =
-                `Same physical 2D from flatten <strong>[${result.physical.join(",")}]</strong> — now slice it`;
-            stack.insertBefore(status, stage);
-
-            if (left) left.classList.add("slice-exit");
-            if (arrow) arrow.classList.add("slice-exit");
-            right?.querySelectorAll(".dim-badge, .flatten-status").forEach((el) => el.remove());
-            const h3 = right?.querySelector("h3");
-            if (h3) h3.textContent = "Physical 2D (from flatten)";
-
-            await sleep(480);
-            if (token !== dealToken) return;
-            left?.remove();
-            arrow?.remove();
-            stage.classList.add("slice-solo");
-            await sleep(320);
-            if (token !== dealToken) return;
-        } else {
-            status.innerHTML =
-                `Physical 2D <strong>[${result.physical.join(",")}]</strong> — ready to cut into shards`;
-            buildFlatFoldedView({ showPages: true, layerBands: true });
-            stack.insertBefore(status, stack.firstChild);
-            await sleep(400);
-            if (token !== dealToken) return;
-        }
-
         status.innerHTML =
-            `Drawing cut lines for <strong>${meta.shards.length}</strong> shards…`;
-        await paintCutPreview(token);
-        if (token !== dealToken) return;
+            `Padded ND <strong>[${result.paddedShape.join(",")}]</strong> → pages ` +
+            `<strong>[${(result.tensorShapeInPages || []).join(",")}]</strong> — cut into N-D shards`;
+        buildNdView({ mode: "padded", colored: false, showPages: true, alignTone: "static" });
+        stack.insertBefore(status, stack.firstChild);
         await sleep(450);
         if (token !== dealToken) return;
 
-        // Morph continuous grid → packed shard tiles (same stage, brief fade).
-        status.innerHTML = `Separating shards…`;
+        status.innerHTML =
+            `Drawing cut lines for <strong>${meta.shards.length}</strong> shards` +
+            ` of shape <strong>[${(result.ndShardShape || []).join(",")}]</strong>…`;
+        await paintCutPreview(token);
+        if (token !== dealToken) return;
+        await sleep(400);
+        if (token !== dealToken) return;
+
+        status.innerHTML = `Separating N-D shards…`;
         stack.classList.add("slice-morph-out");
         await sleep(280);
         if (token !== dealToken) return;
 
         const grid = buildSlicedView({ colored: false, ghost: false, tight: true, pending: true });
-        stack.insertBefore(status, grid);
-        status.innerHTML = `Opening shard boundaries…`;
+        // Prefer a status line above the whole stack.
+        stack.insertBefore(status, stack.firstChild);
+        status.innerHTML =
+            `Opening shard grid <strong>[${(result.mapping.shardGrid || []).join(",")}]</strong>…`;
         stack.classList.add("slice-morph-in");
         stack.classList.remove("slice-morph-out");
         await sleep(60);
         if (token !== dealToken) return;
 
-        grid.classList.add("sliced");
-        await sleep(600);
+        stack.querySelectorAll(".grid2d").forEach((g) => g.classList.add("sliced"));
+        await sleep(550);
         if (token !== dealToken) return;
         stack.classList.remove("slice-morph-in");
 
-        const shardEls = [...grid.querySelectorAll(".shard")];
+        const shardEls = [...stack.querySelectorAll(".shard")];
         for (const el of shardEls) {
             if (token !== dealToken) return;
-            const eh = el.dataset.shapeH;
-            const ew = el.dataset.shapeW;
+            const nd = el.dataset.shapeNd || `${el.dataset.shapeH},${el.dataset.shapeW}`;
             status.innerHTML =
-                `Shard shape <strong>[${eh}, ${ew}]</strong>` +
-                ` · height <strong>${eh}</strong> × width <strong>${ew}</strong>`;
+                `Shard shape <strong>[${nd}]</strong>` +
+                ` · coord highlighted`;
             el.classList.remove("slice-pending");
             el.classList.add("slice-cutting", "shard-revealed");
-            await sleep(420);
+            await sleep(360);
             if (token !== dealToken) return;
             el.classList.remove("slice-cutting");
-            await sleep(100);
+            await sleep(80);
         }
 
         if (token !== dealToken) return;
         const sample = meta.shards[0];
-        const [eh0, ew0] = sample ? shardElemShape(sample) : ["?", "?"];
+        const shape0 = sample ? shardElemShape(sample) : ["?"];
         status.innerHTML =
             `Done — <strong>${meta.shards.length}</strong> shards of shape ` +
-            `<strong>[${eh0}, ${ew0}]</strong> ` +
-            `(H along left, W along bottom) from physical <strong>[${result.physical.join(",")}]</strong>`;
+            `<strong>[${shape0.join(",")}]</strong> from padded ` +
+            `<strong>[${result.paddedShape.join(",")}]</strong> / pages ` +
+            `<strong>[${(result.tensorShapeInPages || []).join(",")}]</strong>`;
     }
 
     function buildCoresSkeleton() {
@@ -1881,7 +2036,9 @@
                 const shard = meta.shards.find((s) => s.id === sid);
                 if (!shard) continue;
                 any = true;
-                slots.appendChild(makeShardEl(shard, { colored: true, showPad: true, showTag: false }));
+                slots.appendChild(makeShardEl(shard, {
+                    colored: true, showPad: true, showTag: false, inCore: true,
+                }));
             }
             if (!any) slots.innerHTML = `<span class="placeholder">(empty)</span>`;
             dom.cores.querySelector(`[data-core="${bank.bankId}"]`).classList.toggle("lit", any);
@@ -1908,9 +2065,16 @@
         if (!beginHover("cell", `${r},${c}`)) return;
         document.querySelectorAll(`.cell[data-r="${r}"][data-c="${c}"]`).forEach((el) => el.classList.add("hl-cell"));
         const cell = document.querySelector(`.cell[data-r="${r}"][data-c="${c}"]`);
-        if (cell && cell.dataset.core !== "-1") {
+        if (!cell) return;
+        if (cell.dataset.core !== "-1") {
             const core = document.querySelector(`.core[data-core="${cell.dataset.core}"]`);
             if (core) core.classList.add("hl-core");
+        }
+        // Also light the owning shard tile in the cores pane (core-map step).
+        if (cell.dataset.shard != null && cell.dataset.shard !== "-1") {
+            document.querySelectorAll(`.shard[data-shard="${cell.dataset.shard}"]`).forEach((el) => {
+                if (!el.classList.contains("ghost")) el.classList.add("hl");
+            });
         }
     }
     function setShardHover(sid) {
@@ -1965,10 +2129,11 @@
     // ---- chrome ----
     function shapePills() {
         const shard = result.ndShardShape;
+        const tip = result.tensorShapeInPages;
         return (
             `<span class="shape-pill">logical <em>[${result.logicalShape.join(",")}]</em></span>` +
             `<span class="shape-pill">padded <em>[${result.paddedShape.join(",")}]</em></span>` +
-            `<span class="shape-pill">physical <em>[${result.physical.join(",")}]</em></span>` +
+            `<span class="shape-pill">pages <em>[${(tip || []).join(",")}]</em></span>` +
             `<span class="shape-pill">align <em>[${result.alignment.join(",")}]</em></span>` +
             (shard
                 ? `<span class="shape-pill">shard <em>[${shard.join(",")}]</em></span>`
@@ -1988,13 +2153,20 @@
             ["Alignment mode", (res.cfg && res.cfg.alignMode) || "default"],
             ["Alignment", `[${res.alignment.join(", ")}]`],
             ["Padded shape", res.paddedShape.join(" × ")],
-            ["Physical 2D (elements)", `${res.physical[0]} × ${res.physical[1]}`, true],
+            ["Physical 2D fold (ref)", `${res.physical[0]} × ${res.physical[1]}`],
             ["Page shape (elements)", `${res.pageShape[0]} × ${res.pageShape[1]}`],
-            ["Tensor in pages", `${res.tensor2dInPages[0]} × ${res.tensor2dInPages[1]}  (= ${m.numPages})`, true],
+            ["Tensor in pages (ND)", `${(res.tensorShapeInPages || []).join(" × ")}  (= ${m.numPages})`, true],
         ];
+        if (res.cfg && res.cfg.requestedNdShardShape) {
+            rows.push(["Requested shard", res.cfg.requestedNdShardShape.join(" × ")]);
+        }
+        if (res.cfg && res.cfg.ndAlignment) {
+            rows.push(["ShardShapeAlignment", res.cfg.ndAlignment]);
+        }
         if (res.distribution !== "interleaved") {
-            rows.push(["Shard (elements)", res.ndShardShape ? res.ndShardShape.join(" × ") : "—"]);
+            rows.push(["Shard (elements)", res.ndShardShape ? res.ndShardShape.join(" × ") : "—", true]);
             rows.push(["Shard (pages)", res.shardShapeInPages ? res.shardShapeInPages.join(" × ") : "—"]);
+            rows.push(["Shard grid", (m.shardGrid || []).join(" × ")]);
             rows.push(["Distribution", res.distribution === "grid_2d" ? "grid (2D)" : "round-robin (1D)"]);
             rows.push(["Orientation", orient]);
             rows.push(["Shards", m.numShards]);
@@ -2020,10 +2192,10 @@
         dom.btnPrev.disabled = state === 0 || playing;
         dom.btnNext.disabled = state === STATES.length - 1 || playing;
 
-        // Flatten / compare / slice: omit core grid (cores arrive at map).
+        // Shard-align / slice: omit core grid (cores arrive at map).
         const stageEl = document.querySelector(".stage");
         stageEl.classList.toggle("solo-tensor",
-            id === "flatten" || id === "compare" || id === "slice");
+            id === "shardalign" || id === "slice");
 
         const kind = result.memoryLayout.replace("_SHARDED", "").toLowerCase();
         dom.coresLabel.textContent = `(${meta.gridX}×${meta.gridY})`;
@@ -2033,13 +2205,12 @@
 
         if (id === "input") {
             const cubeOn = dom.cube3d.checked && result.logicalShape.length === 3;
-            const noPad = !needsPaddingStep(result);
-            const noFlat = !needsFlattenStep(result);
             const skips = [];
-            if (noPad) skips.push("no pad step");
-            if (noFlat) skips.push("no flatten step");
+            if (!needsPaddingStep(result)) skips.push("no pad step");
+            if (!needsShardAlignStep(result)) skips.push("no shard-align step");
             dom.tensorSub.innerHTML =
                 `<span class="shape-pill">logical <em>[${result.logicalShape.join(",")}]</em></span>` +
+                `<span class="shape-pill">shard <em>[${(result.cfg.requestedNdShardShape || result.ndShardShape || []).join(",")}]</em></span>` +
                 (cubeOn
                     ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em> of input layers`
                     : ` · original input`) +
@@ -2051,20 +2222,21 @@
                 (result.paddedShape.length === 3
                     ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em>`
                     : ` · padded ND`);
-        } else if (id === "flatten") {
-            dom.tensorSub.innerHTML = shapePills() +
-                ` · high <code>z</code> leaves first · 3D stays empty when drained`;
-        } else if (id === "compare") {
+        } else if (id === "shardalign") {
+            const req = (result.cfg && result.cfg.requestedNdShardShape) || [];
+            const got = result.ndShardShape || [];
+            const mode = (result.cfg && result.cfg.ndAlignment) || "REQUIRED";
             dom.tensorSub.innerHTML =
-                `<span class="dim-badge before">before <em>[${result.paddedShape.join(",")}]</em></span>` +
+                `<span class="dim-badge before">requested <em>[${req.join(",")}]</em></span>` +
                 ` → ` +
-                `<span class="dim-badge after">after <em>[${result.physical.join(",")}]</em></span>`;
+                `<span class="dim-badge after">${mode} <em>[${got.join(",")}]</em></span>`;
         } else if (id === "slice") {
             dom.tensorSub.innerHTML =
-                `${result.mapping.numShards} shards · each ~[${(result.ndShardShape || []).join(",")}] elem` +
+                `${result.mapping.numShards} shards · each [${(result.ndShardShape || []).join(",")}] elem` +
+                ` · pages [${(result.tensorShapeInPages || []).join(",")}]` +
                 ` · page ${result.pageShape.join("×")}`;
         } else if (id === "map") {
-            dom.tensorSub.innerHTML = shapePills() + ` · shards dealt to cores`;
+            dom.tensorSub.innerHTML = shapePills() + ` · shards dealt to cores (${result.distribution})`;
         } else {
             dom.tensorSub.innerHTML =
                 shapePills() +
@@ -2377,8 +2549,10 @@
             const destRect = destProbe.getBoundingClientRect();
             destProbe.remove();
 
-            const flyer = makeShardEl(shard, { colored: true, showPad: true, showTag: false });
-            flyer.className = "shard flyer";
+            const flyer = makeShardEl(shard, {
+                colored: true, showPad: true, showTag: false, inCore: true,
+            });
+            flyer.classList.add("flyer");
             flyer.style.left = `${srcRect.left}px`;
             flyer.style.top = `${srcRect.top}px`;
             document.body.appendChild(flyer);
@@ -2393,7 +2567,9 @@
             if (token !== dealToken) { flyer.remove(); return; }
 
             flyer.remove();
-            slots.appendChild(makeShardEl(shard, { colored: true, showPad: true, showTag: false }));
+            slots.appendChild(makeShardEl(shard, {
+                colored: true, showPad: true, showTag: false, inCore: true,
+            }));
             src.classList.add("ghost");
             src.style.opacity = "";
         }
@@ -2452,26 +2628,14 @@
                 buildNdView({ mode: "padded", colored: false, showPages: false, alignTone: "blink" });
             }
             clearCoreSlots();
-        } else if (id === "flatten") {
-            // Flatten: high-z leaves first; settle with empty 3D + filled 2D
-            if (animate && (prevId === "align" || prevId === "input")) {
-                await animateFlatten();
-            } else {
-                buildFlattenEndView();
-            }
+        } else if (id === "shardalign") {
+            buildShardAlignView();
             clearCoreSlots();
-        } else if (id === "compare") {
-            // Before (full 3D) vs after (2D); loop high→low z flash on both
-            buildCompareView();
-            clearCoreSlots();
-            void runCompareFlashLoop();
         } else if (id === "slice") {
             rotX = -20;
             rotY = -28;
-            // May arrive from compare/flatten, or directly from align/input when
-            // those earlier stages were skipped (no pad / already 2D).
-            if (animate && (prevId === "compare" || prevId === "flatten" ||
-                    prevId === "align" || prevId === "input")) {
+            // Arrive from shardalign / align / input when earlier stages were skipped.
+            if (animate && (prevId === "shardalign" || prevId === "align" || prevId === "input")) {
                 await animateSlice();
             } else {
                 buildSlicedView({ colored: false, ghost: false });
@@ -2513,10 +2677,8 @@
             if (state < STATES.length - 1) {
                 await new Promise((resolve) => {
                     const id = stepId();
-                    const zHold = Math.max(1600, numZPlanes() * 800 + 400);
                     const hold = id === "align" ? 1400
-                        : id === "flatten" ? 900
-                        : id === "compare" ? zHold
+                        : id === "shardalign" ? 1600
                         : id === "slice" ? 900
                         : id === "map" ? 400
                         : id === "coremap" ? 1200
@@ -2540,20 +2702,18 @@
         if (dom.layout.value === "TILE") {
             p.push("tile=" + dom.tileH.value + "x" + dom.tileW.value);
         }
-        p.push("sharding=" + dom.sharding.value);
-        p.push("by=" + (dom.configBy.value === "shape" ? "shape" : "grid"));
+        p.push("sharding=nd");
+        p.push("ndshape=" + shapeEnc(dom.ndShardShape.value));
         p.push("grid=" + dom.gridX.value + "x" + dom.gridY.value);
-        if (dom.shardH.value.trim()) p.push("sh=" + dom.shardH.value.trim());
-        if (dom.shardW.value.trim()) p.push("sw=" + dom.shardW.value.trim());
+        p.push("ndstrat=" + dom.ndStrategy.value);
+        p.push("ndalign=" + dom.ndAlignment.value);
         if (dom.orientation.value === "col_major") p.push("orient=col_major");
-        if (dom.alignMode.value === "shard_shape") p.push("alignMode=shard_shape");
-        else if (dom.alignMode.value === "custom") {
+        if (dom.alignMode.value === "custom") {
             p.push("alignMode=custom");
             if (dom.alignment.value.trim()) p.push("align=" + shapeEnc(dom.alignment.value));
         }
         if (!dom.cube3d.checked) p.push("cube3d=0");
         if (state > 0) {
-            // Prefer stable step id so links survive pad-step being toggled.
             p.push("step=" + (stepId() || STEP_LABELS[state] || String(state + 1)));
         }
         return p.join(",");
@@ -2587,25 +2747,18 @@
             setV(dom.tileH, th);
             setV(dom.tileW, tw);
         }
-        setV(dom.sharding, obj.sharding);
-        if (obj.by === "shape" || obj.by === "grid") dom.configBy.value = obj.by;
+        if (obj.ndshape) setV(dom.ndShardShape, shapeDec(obj.ndshape));
         if (obj.grid) {
             const [x, y] = obj.grid.split("x");
             setV(dom.gridX, x);
             setV(dom.gridY, y);
         }
-        // Shape dims: clear first so omitted keys mean auto (grid mode).
-        dom.shardH.value = "";
-        dom.shardW.value = "";
-        setV(dom.shardH, obj.sh);
-        setV(dom.shardW, obj.sw);
-        // If link carries sh/sw but no by=, prefer shape mode.
-        if ((obj.sh || obj.sw) && obj.by == null) dom.configBy.value = "shape";
+        setV(dom.ndStrategy, obj.ndstrat);
+        setV(dom.ndAlignment, obj.ndalign);
         if (obj.orient === "col_major" || obj.orient === "row_major") {
             dom.orientation.value = obj.orient;
         }
-        // Legacy links with only align=… imply custom mode.
-        if (obj.alignMode === "shard_shape" || obj.alignMode === "custom" || obj.alignMode === "default") {
+        if (obj.alignMode === "custom" || obj.alignMode === "default") {
             dom.alignMode.value = obj.alignMode;
         } else if (obj.align) {
             dom.alignMode.value = "custom";
@@ -2616,7 +2769,6 @@
         setV(dom.alignment, obj.align && shapeDec(obj.align));
         dom.cube3d.checked = obj.cube3d !== "0";
 
-        // Return a step id (preferred) or a legacy label/number for resolveStepRef.
         if (obj.step != null) return String(obj.step);
         return null;
     }
@@ -2642,18 +2794,8 @@
             cfg = readCfg();
             cfg.alignment = resolveAlignment(cfg);
             result = TensorMapping.computeTensorMapping(cfg);
-            ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
-            // Shape-mode grid refine can change shard count; re-resolve shard_shape
-            // alignment against the final mapping so Alignment matches the shards.
-            if (cfg.alignMode === "shard_shape") {
-                const nextAlign = (result.ndShardShape || []).slice(-2);
-                if (nextAlign.length === 2 &&
-                    (cfg.alignment[0] !== nextAlign[0] || cfg.alignment[1] !== nextAlign[1])) {
-                    cfg = { ...cfg, alignment: nextAlign };
-                    result = TensorMapping.computeTensorMapping(cfg);
-                    ({ cfg, res: result } = refineShapeModeGrid(cfg, result));
-                }
-            }
+            // Keep the requested shape on the result cfg for the shard-align step.
+            result.cfg = { ...result.cfg, ...cfg, requestedNdShardShape: cfg.requestedNdShardShape };
             meta = buildMeta(result);
         } catch (e) {
             dom.cfgError.textContent = e.message || String(e);
@@ -2661,9 +2803,9 @@
         }
 
         // Scale cells a bit for larger tensors
-        const maxDim = Math.max(result.physical[0], result.physical[1]);
-        const cw = maxDim > 16 ? 20 : maxDim > 10 ? 24 : 28;
-        const ch = maxDim > 16 ? 16 : maxDim > 10 ? 18 : 22;
+        const maxDim = Math.max(result.physical[0], result.physical[1], ...(result.paddedShape || [1]));
+        const cw = maxDim > 64 ? 14 : maxDim > 16 ? 20 : maxDim > 10 ? 24 : 28;
+        const ch = maxDim > 64 ? 12 : maxDim > 16 ? 16 : maxDim > 10 ? 18 : 22;
         document.documentElement.style.setProperty("--cell-w", cw + "px");
         document.documentElement.style.setProperty("--cell-h", ch + "px");
 
@@ -2671,9 +2813,6 @@
         syncAlignMode();
         rebuildWalkthrough({ keepId });
         buildCoresSkeleton();
-        // rebuildWalkthrough already clamped `state` by keepId (e.g. align → flatten
-        // when padding vanishes). Only re-resolve when the hash explicitly asks for
-        // a step that still exists in the new walkthrough.
         let next = state;
         if (stepRef != null) {
             const resolved = indexOfStep(String(stepRef));
@@ -2681,7 +2820,6 @@
             else {
                 const byLabel = STEP_LABELS.indexOf(String(stepRef));
                 if (byLabel >= 0) next = byLabel;
-                // else keep rebuildWalkthrough's fallback (already in `state`)
             }
         }
         goTo(next, { animate: false });
@@ -2718,14 +2856,19 @@
     dom.btnNext.addEventListener("click", () => { if (state < STATES.length - 1) goTo(state + 1, { animate: true }); });
     dom.btnPlay.addEventListener("click", () => play());
     dom.layout.addEventListener("change", syncTileField);
-    dom.sharding.addEventListener("change", syncConfigMode);
-    dom.configBy.addEventListener("change", syncConfigMode);
-    dom.orientation.addEventListener("change", syncConfigMode);
+    dom.ndStrategy.addEventListener("change", syncNdHints);
+    dom.ndAlignment.addEventListener("change", syncNdHints);
+    dom.orientation.addEventListener("change", syncNdHints);
     dom.alignMode.addEventListener("change", syncAlignMode);
     dom.cube3d.addEventListener("change", () => {
         const id = stepId();
-        if (id === "input" || id === "align" || id === "coremap") goTo(state, { animate: false });
-        else { updateChrome(); updateHash(); }
+        // 3D toggle also switches shard tiles between cubes and flat page grids.
+        if (id === "input" || id === "align" || id === "slice" || id === "map" || id === "coremap") {
+            goTo(state, { animate: false });
+        } else {
+            updateChrome();
+            updateHash();
+        }
     });
     document.querySelectorAll("#presets button").forEach((btn) => {
         btn.addEventListener("click", () => applyPreset(btn.dataset.preset));
@@ -2736,19 +2879,19 @@
         if (raw === lastHash) return;
         const stepRef = applyHash();
         syncTileField();
-        syncConfigMode();
         syncAlignMode();
+        syncNdHints();
         recompute({ fromHash: true, stepRef });
     });
 
     syncTileField();
-    syncConfigMode();
     syncAlignMode();
+    syncNdHints();
     {
         const stepRef = applyHash();
         syncTileField();
-        syncConfigMode();
         syncAlignMode();
+        syncNdHints();
         recompute({ fromHash: !!location.hash, stepRef });
     }
 })();

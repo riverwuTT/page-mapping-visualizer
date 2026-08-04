@@ -17,6 +17,8 @@ visualizers and an overview landing page:
     (`ROW_MAJOR` / `TILE`).
   - **2D sharding** (`shard_2d_anim.html`) — classic height / width / block:
     align → flatten → slice → shards→cores.
+  - **ND sharding** (`shard_nd_anim.html`) — `TensorSpec::sharded` /
+    `NdShardSpec`: pad → shard-align → slice ND (no flatten) → shards→cores.
 
 The tensor model sits on top of the buffer model: it adds the element-shape ÷
 layout step (`compute_physical_shape` → `get_page_shape`) the buffer model
@@ -32,6 +34,7 @@ is fully self-contained (no network, no server):
 - **`page_mapping_viz.html`** — the buffer visualizer.
 - **`animated.html`** — interleaved animated mapping walkthrough.
 - **`shard_2d_anim.html`** — 2D sharding animated walkthrough.
+- **`shard_nd_anim.html`** — ND sharding animated walkthrough.
 
 ## Deploy (GitHub Pages)
 
@@ -55,6 +58,7 @@ plan the repo must be public).
 | `buffer.html`           | Buffer dev shell. |
 | `animated.html`         | Interleaved animated mapping walkthrough (self-contained). |
 | `shard_2d_anim.html`    | 2D sharding animated walkthrough (self-contained). |
+| `shard_nd_anim.html`    | ND sharding animated walkthrough (self-contained). |
 | `index.html`            | Overview landing page (self-contained). |
 | `style.css`             | Shared styling. |
 | `build.js`              | Inlines css/js into the dev shells → `tensor_mapping_viz.html` + `page_mapping_viz.html`. |

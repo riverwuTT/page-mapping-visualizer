@@ -116,6 +116,20 @@
                     <span class="chip">block</span><span class="chip">step-through</span>
                 </div>
             </a>
+
+            <a class="card" href="shard_nd_anim.html">
+                <h2>ND sharding →</h2>
+                <p>
+                    Arbitrary N-D via <code>TensorSpec::sharded</code>:
+                    <em>input</em> → <em>pad</em> → <em>shard align</em> →
+                    <em>slice ND</em> (no flatten) → <em>shards→cores</em>.
+                </p>
+                <div class="flow">input → pad → shard-align → slice ND → cores</div>
+                <div style="margin-top:10px">
+                    <span class="chip">NdShardSpec</span><span class="chip">round-robin</span>
+                    <span class="chip">grid 2D</span><span class="chip">step-through</span>
+                </div>
+            </a>
         </div>
 
         <div class="note">
@@ -125,8 +139,8 @@
                 missing step in front of it: folding an element shape into pages via the layout
                 (<code>compute_physical_shape</code> → <code>get_page_shape</code>), then handing the
                 resulting page grid + shard shape to the very same page → core logic. Animated mappings
-                walk through that story per distribution — interleaved round-robin, or classic 2D
-                height / width / block. Sources:
+                walk through that story per distribution — interleaved round-robin, classic 2D
+                height / width / block, or arbitrary ND sharding. Sources:
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/experimental/tensor/spec/tensor_spec.hpp">tensor_spec.hpp</a>,
                 <a class="src" href="https://github.com/tenstorrent/tt-metal/blob/main/tt_metal/api/tt-metalium/buffer.hpp">buffer.hpp</a>.
             </p>
