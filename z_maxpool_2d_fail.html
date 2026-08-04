@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  One-off: why classic 2D sharding cannot host a max-pool along Z.
+
+  Ground truth:
+    buffer.hpp  ShardSpec — "depth dimensions ([:-2] are folded along y)"
+    tensor_spec.hpp — height/width/block_sharded flatten to physical 2D first
+    TensorLayout::compute_physical_shape — fold leading dims into height
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Z max-pool vs 2D flatten</title>
+    <style>
+        :root {
+            --bg: #0f1419;
+            --panel: #161b22;
+            --panel2: #1c2330;
+            --border: #2a3340;
+            --text: #d7dee8;
+            --muted: #8b97a7;
+            --accent: #4ea1ff;
+            --warn: #ffa657;
+            --bad: #ff7b72;
+            --ok: #7ee787;
+            --cell: 26px;
+            color-scheme: dark;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        header {
+            padding: 16px 22px;
+            border-bottom: 1px solid var(--border);
+            background: var(--panel);
+        }
+        header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+        header p { margin: 6px 0 0; color: var(--muted); font-size: 12.5px; max-width: 980px; }
+        header code { color: var(--accent); }
+        .topnav { display: flex; gap: 14px; align-items: center; margin-top: 8px; font-size: 12.5px; flex-wrap: wrap; }
+        .topnav a { color: var(--muted); text-decoration: none; padding: 3px 8px; border-radius: 5px; border: 1px solid transparent; }
+        .topnav a:hover { color: var(--text); border-color: var(--border); }
+        .topnav a.active { color: var(--accent); border-color: var(--accent); }
+
+        .layout { display: flex; min-height: calc(100vh - 90px); }
+        #controls {
+            flex: 0 0 270px;
+            padding: 18px;
+            border-right: 1px solid var(--border);
+            background: var(--panel);
+        }
+        #main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        .grp {
+            font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+            margin: 18px 0 10px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+        }
+        .grp:first-child { margin-top: 0; }
+        .field { margin-bottom: 12px; }
+        .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+        .field input, .field select {
+            width: 100%; padding: 7px 9px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); font: inherit;
+        }
+        .row2 { display: flex; gap: 8px; align-items: center; }
+        .row2 input { width: 100%; }
+        .row2 span { color: var(--muted); }
+        .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+        .apply {
+            width: 100%; font: inherit; font-size: 13px; padding: 8px 14px; margin-top: 4px;
+            background: #1a3a5c; border: 1px solid var(--accent);
+            border-radius: 6px; color: #cfe6ff; cursor: pointer;
+        }
+        .apply:hover { filter: brightness(1.08); }
+
+        .toolbar {
+            display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+            padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+        }
+        .toolbar button {
+            font: inherit; font-size: 13px; padding: 7px 14px;
+            background: var(--panel2); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text); cursor: pointer;
+        }
+        .toolbar button:hover { border-color: var(--accent); }
+        .toolbar button.primary { background: #1a3a5c; border-color: var(--accent); color: #cfe6ff; }
+        .toolbar button:disabled { opacity: .4; cursor: default; }
+        .state-label { margin-left: 8px; color: var(--muted); font-size: 13px; }
+        .state-label strong { color: var(--text); }
+        .dots { display: flex; gap: 6px; margin-left: auto; }
+        .dots span {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--border); border: 1px solid var(--border);
+        }
+        .dots span.on { background: var(--accent); border-color: var(--accent); }
+
+        .stage { padding: 24px 22px 40px; }
+        .pane h2 {
+            margin: 0 0 6px; font-size: 13px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .sub { margin: 0 0 16px; color: var(--muted); font-size: 12.5px; max-width: 900px; }
+        .sub code { color: var(--accent); }
+        .sub .bad { color: var(--bad); }
+        .sub .ok { color: var(--ok); }
+        .sub .warn { color: var(--warn); }
+
+        .viz {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 22px;
+            align-items: start;
+        }
+        @media (max-width: 980px) {
+            .layout { flex-direction: column; }
+            #controls { flex: none; border-right: none; border-bottom: 1px solid var(--border); }
+            .viz { grid-template-columns: 1fr; }
+            .arrow { transform: rotate(90deg); justify-self: center; padding-top: 0 !important; }
+        }
+        .col h3 {
+            margin: 0 0 8px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+        }
+        .arrow {
+            align-self: center; font-size: 28px; color: var(--muted); padding-top: 48px;
+        }
+
+        .badge {
+            display: inline-block; margin: 0 0 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12.5px; padding: 6px 10px; border-radius: 6px;
+            border: 1px solid var(--border); background: var(--panel2);
+        }
+        .badge em { font-style: normal; font-weight: 700; color: #fff; }
+        .badge.need { border-color: #7a5cff; color: #c8b6ff; }
+        .badge.flat { border-color: #3ecf8e; color: #9af0c4; }
+        .badge.fail { border-color: var(--bad); color: #ffb4b4; }
+
+        /* stacked planes (simple 3D) */
+        .cube-stage {
+            perspective: 900px;
+            width: 280px; height: 220px;
+            margin: 8px 0 12px;
+            user-select: none;
+            cursor: grab;
+        }
+        .cube-scene {
+            width: 100%; height: 100%;
+            position: relative;
+            transform-style: preserve-3d;
+            transition: transform .05s linear;
+        }
+        .plane {
+            position: absolute; left: 50%; top: 50%;
+            transform-style: preserve-3d;
+            border: 1px solid var(--border);
+            background: rgba(22, 27, 34, .85);
+            border-radius: 4px;
+            padding: 4px;
+        }
+        .plane-lab {
+            position: absolute; left: -52px; top: 50%; transform: translateY(-50%);
+            font: 11px ui-monospace, Menlo, monospace; color: var(--muted); white-space: nowrap;
+        }
+        .plane .cells {
+            display: grid; gap: 2px;
+        }
+        .cell {
+            width: var(--cell); height: var(--cell);
+            display: flex; align-items: center; justify-content: center;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            font: 10px/1 ui-monospace, Menlo, monospace;
+            background: #1a2230;
+            color: #9aa7b8;
+            transition: outline .15s, filter .15s, opacity .2s, box-shadow .15s, transform .2s;
+        }
+        .cell.z-tone { color: #0f1419; font-weight: 700; }
+        .cell.fiber {
+            outline: 2px solid #fff;
+            outline-offset: 1px;
+            box-shadow: 0 0 12px rgba(255,255,255,.45);
+            z-index: 2;
+            position: relative;
+        }
+        .cell.dimmed { opacity: .22; filter: grayscale(.6); }
+        .cell.core-tone { color: #0f1419; font-weight: 700; }
+        .cell.stray {
+            outline: 2px solid var(--bad);
+            outline-offset: 1px;
+            animation: pulseBad 1s ease-in-out infinite;
+        }
+        @keyframes pulseBad {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255,123,114,.0); }
+            50% { box-shadow: 0 0 14px 2px rgba(255,123,114,.55); }
+        }
+
+        .grid2d {
+            display: grid; gap: 2px; width: max-content;
+            padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+            background: var(--panel2);
+        }
+        .grid2d.sliced {
+            gap: 10px;
+            background: transparent;
+            border: none;
+            padding: 0;
+        }
+        .shard {
+            display: grid; gap: 2px;
+            padding: 6px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--panel2);
+            position: relative;
+        }
+        .shard-tag {
+            position: absolute; top: -9px; left: 8px;
+            font: 10px ui-monospace, Menlo, monospace;
+            background: var(--bg); padding: 0 5px; color: var(--muted);
+        }
+        .shard-tag strong { color: var(--text); }
+
+        .legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+        .sw {
+            display: inline-flex; align-items: center; gap: 5px;
+            font-size: 11px; color: var(--muted);
+            padding: 2px 6px; border-radius: 4px;
+        }
+        .sw .box {
+            width: 12px; height: 12px; border-radius: 2px;
+            border: 1px solid var(--border);
+        }
+
+        .verdict {
+            margin-top: 22px;
+            padding: 14px 16px;
+            border-radius: 8px;
+            border: 1px solid #5a3030;
+            background: #2a1717;
+            max-width: 920px;
+        }
+        .verdict h3 { margin: 0 0 6px; color: var(--bad); font-size: 14px; }
+        .verdict p { margin: 0; color: var(--text); font-size: 13px; }
+        .verdict code { color: var(--accent); }
+        .verdict .fix {
+            margin-top: 10px;
+            font-family: ui-monospace, Menlo, monospace;
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .verdict .fix span { color: var(--warn); }
+
+        .fiber-table {
+            border-collapse: collapse;
+            font: 12.5px ui-monospace, Menlo, monospace;
+            margin-top: 14px;
+        }
+        .fiber-table th, .fiber-table td {
+            border: 1px solid var(--border);
+            padding: 6px 10px;
+            text-align: left;
+        }
+        .fiber-table th { color: var(--muted); font-weight: 500; background: var(--panel2); }
+        .fiber-table td.v { color: var(--warn); }
+        .fiber-table td.bad { color: var(--bad); font-weight: 700; }
+
+        .quote {
+            margin: 14px 0 0;
+            padding: 10px 12px;
+            border-left: 3px solid var(--accent);
+            background: var(--panel2);
+            color: var(--muted);
+            font-size: 12px;
+            max-width: 920px;
+        }
+        .quote code { color: var(--accent); }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Z max-pool vs 2D flatten</h1>
+        <p>
+            Classic 2D sharding (<code>height_sharded</code> / <code>width_sharded</code> /
+            <code>block_sharded</code>) folds every leading dim into height before slicing.
+            A max-pool along <em>Z</em> needs a fiber <code>{z=*}</code> at fixed
+            <code>(y,x)</code> — after the fold those neighbors are <em>H</em> rows apart and
+            land on different cores. Self-contained one-off; numbers match
+            <code>compute_physical_shape</code> + <code>ShardSpec</code> fold rule.
+        </p>
+    </header>
+
+    <div class="layout">
+        <div id="controls">
+            <div class="grp">Tensor (ROW_MAJOR)</div>
+            <div class="field">
+                <label>Shape [Z, H, W]</label>
+                <div class="row2">
+                    <input id="dimZ" type="number" min="2" max="8" value="4" title="Z" />
+                    <span>×</span>
+                    <input id="dimH" type="number" min="1" max="8" value="3" title="H" />
+                    <span>×</span>
+                    <input id="dimW" type="number" min="1" max="8" value="4" title="W" />
+                </div>
+                <div class="hint">No pad — keeps the fold story clear.</div>
+            </div>
+            <div class="field">
+                <label>Track fiber at (y, x)</label>
+                <div class="row2">
+                    <input id="fy" type="number" min="0" value="1" title="y" />
+                    <span>,</span>
+                    <input id="fx" type="number" min="0" value="2" title="x" />
+                </div>
+                <div class="hint">Max-pool-Z reduces over all z at this spatial cell.</div>
+            </div>
+
+            <div class="grp">2D sharding</div>
+            <div class="field">
+                <label>Model</label>
+                <select id="sharding">
+                    <option value="height" selected>height</option>
+                    <option value="block">block</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>Core grid</label>
+                <div class="row2">
+                    <input id="gridX" type="number" min="1" max="8" value="1" />
+                    <span>×</span>
+                    <input id="gridY" type="number" min="1" max="8" value="4" />
+                </div>
+                <div class="hint" id="gridHint">height: use Y cores (X ignored). Default 1×4 → one Z-plane per core.</div>
+            </div>
+            <button class="apply" id="btnApply">Apply</button>
+
+            <div class="quote">
+                <code>ShardSpec::shape</code> — “Canonical tensor shape where the
+                <strong style="color:var(--text)">depth dimensions ([:-2] are folded along y)</strong>”
+                · <code>buffer.hpp</code>
+            </div>
+        </div>
+
+        <div id="main">
+            <div class="toolbar">
+                <button id="btnReset">Reset</button>
+                <button id="btnPrev">← Prev</button>
+                <button id="btnNext" class="primary">Next →</button>
+                <button id="btnPlay">Play</button>
+                <span class="state-label">
+                    Step <strong id="stateNum">1</strong> / <span id="stateTotal">4</span>
+                    — <span id="stateName">need</span>
+                </span>
+                <div class="dots" id="dots"></div>
+            </div>
+            <div class="stage">
+                <div class="pane">
+                    <h2 id="title">① Need — max-pool along Z</h2>
+                    <p class="sub" id="subtitle"></p>
+                    <div id="viz"></div>
+                    <div id="extra"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+(function () {
+    "use strict";
+
+    const PALETTE = [
+        "#4ea1ff", "#7ee787", "#ffa657", "#d2a8ff",
+        "#ff7b72", "#79c0ff", "#a5d6ff", "#f2cc60",
+    ];
+    const colorFor = (i) => PALETTE[((i % PALETTE.length) + PALETTE.length) % PALETTE.length];
+
+    const STATES = [
+        { id: "need",   name: "need",   title: "① Need — max-pool along Z" },
+        { id: "flatten", name: "flatten", title: "② Flatten — ND → physical 2D" },
+        { id: "shard",  name: "shard",  title: "③ Slice — 2D shards → cores" },
+        { id: "fail",   name: "fail",   title: "④ Broken — fiber split across cores" },
+    ];
+
+    const dom = {
+        dimZ: document.getElementById("dimZ"),
+        dimH: document.getElementById("dimH"),
+        dimW: document.getElementById("dimW"),
+        fy: document.getElementById("fy"),
+        fx: document.getElementById("fx"),
+        sharding: document.getElementById("sharding"),
+        gridX: document.getElementById("gridX"),
+        gridY: document.getElementById("gridY"),
+        gridHint: document.getElementById("gridHint"),
+        title: document.getElementById("title"),
+        subtitle: document.getElementById("subtitle"),
+        viz: document.getElementById("viz"),
+        extra: document.getElementById("extra"),
+        stateNum: document.getElementById("stateNum"),
+        stateTotal: document.getElementById("stateTotal"),
+        stateName: document.getElementById("stateName"),
+        dots: document.getElementById("dots"),
+        btnPrev: document.getElementById("btnPrev"),
+        btnNext: document.getElementById("btnNext"),
+        btnPlay: document.getElementById("btnPlay"),
+    };
+
+    dom.stateTotal.textContent = String(STATES.length);
+
+    let cfg = null;
+    let state = 0;
+    let playing = false;
+    let playTimer = null;
+    let rotX = -22, rotY = -32;
+    let dragging = false, lastX = 0, lastY = 0;
+
+    function readCfg() {
+        const Z = Math.max(2, Math.min(8, +dom.dimZ.value || 4));
+        const H = Math.max(1, Math.min(8, +dom.dimH.value || 3));
+        const W = Math.max(1, Math.min(8, +dom.dimW.value || 4));
+        dom.dimZ.value = Z; dom.dimH.value = H; dom.dimW.value = W;
+
+        let fy = Math.max(0, Math.min(H - 1, +dom.fy.value || 0));
+        let fx = Math.max(0, Math.min(W - 1, +dom.fx.value || 0));
+        dom.fy.value = fy; dom.fx.value = fx;
+        dom.fy.max = H - 1; dom.fx.max = W - 1;
+
+        const sharding = dom.sharding.value;
+        let gX = Math.max(1, Math.min(8, +dom.gridX.value || 1));
+        let gY = Math.max(1, Math.min(8, +dom.gridY.value || 4));
+        if (sharding === "height") {
+            // Height sharding is 1D over cores; treat grid as gY cores (or gX*gY).
+            gX = 1;
+            dom.gridX.value = 1;
+            dom.gridHint.textContent =
+                `height: ${gY} cores along folded H. physical [${Z * H}, ${W}] → shardH = ceil(${Z * H}/${gY}).`;
+        } else {
+            dom.gridHint.textContent =
+                `block: ${gX}×${gY} cores on physical [${Z * H}, ${W}].`;
+        }
+        dom.gridX.value = gX; dom.gridY.value = gY;
+
+        // compute_physical_shape with identity alignment: fold leading → height
+        const physH = Z * H;
+        const physW = W;
+
+        let shardH, shardW, nCores, coreOf;
+        if (sharding === "height") {
+            nCores = gY;
+            shardH = Math.ceil(physH / nCores);
+            shardW = physW;
+            coreOf = (r, c) => Math.min(nCores - 1, Math.floor(r / shardH));
+        } else {
+            nCores = gX * gY;
+            shardH = Math.ceil(physH / gY);
+            shardW = Math.ceil(physW / gX);
+            coreOf = (r, c) => {
+                const sr = Math.min(gY - 1, Math.floor(r / shardH));
+                const sc = Math.min(gX - 1, Math.floor(c / shardW));
+                return sr * gX + sc; // row-major shard grid → cores
+            };
+        }
+
+        // Fiber: all z at (fy, fx). Flat row = z * H + fy
+        const fiber = [];
+        for (let z = 0; z < Z; z++) {
+            const r = z * H + fy;
+            const c = fx;
+            const core = coreOf(r, c);
+            fiber.push({ z, y: fy, x: fx, r, c, core });
+        }
+        const coresUsed = new Set(fiber.map((e) => e.core));
+
+        return {
+            Z, H, W, fy, fx, sharding, gX, gY,
+            physH, physW, shardH, shardW, nCores, coreOf, fiber, coresUsed,
+        };
+    }
+
+    function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+    function makeCellEl({ z, y, x, r, c, label, tone, fiber, dimmed, core, stray }) {
+        const el = document.createElement("div");
+        el.className = "cell";
+        if (tone === "z") {
+            el.classList.add("z-tone");
+            el.style.background = colorFor(z);
+            el.style.borderColor = colorFor(z);
+        } else if (tone === "core" && core != null) {
+            el.classList.add("core-tone");
+            el.style.background = colorFor(core);
+            el.style.borderColor = colorFor(core);
+        }
+        if (fiber) el.classList.add("fiber");
+        if (stray) el.classList.add("stray");
+        if (dimmed) el.classList.add("dimmed");
+        el.textContent = label != null ? label : String(z);
+        el.title = `[z,y,x]=[${z},${y},${x}] → flat (r,c)=(${r},${c})` +
+            (core != null ? ` → core ${core}` : "");
+        return el;
+    }
+
+    function buildCube(cfg, { tone, highlightFiber, dimOthers, colorByCore }) {
+        const stage = document.createElement("div");
+        stage.className = "cube-stage";
+        const scene = document.createElement("div");
+        scene.className = "cube-scene";
+        scene.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        const gap = 52;
+        const { Z, H, W, fy, fx, coreOf } = cfg;
+
+        for (let z = 0; z < Z; z++) {
+            const plane = document.createElement("div");
+            plane.className = "plane";
+            plane.style.transform =
+                `translate(-50%, -50%) translateZ(${(z - (Z - 1) / 2) * gap}px)`;
+            const lab = document.createElement("div");
+            lab.className = "plane-lab";
+            lab.textContent = `z=${z}`;
+            lab.style.color = colorFor(z);
+            plane.appendChild(lab);
+            const cells = document.createElement("div");
+            cells.className = "cells";
+            cells.style.gridTemplateColumns = `repeat(${W}, var(--cell))`;
+            for (let y = 0; y < H; y++) {
+                for (let x = 0; x < W; x++) {
+                    const r = z * H + y;
+                    const c = x;
+                    const isFiber = highlightFiber && y === fy && x === fx;
+                    const core = colorByCore ? coreOf(r, c) : null;
+                    cells.appendChild(makeCellEl({
+                        z, y, x, r, c,
+                        label: colorByCore ? String(core) : String(z),
+                        tone: colorByCore ? "core" : "z",
+                        fiber: isFiber,
+                        stray: isFiber && colorByCore,
+                        dimmed: dimOthers && !isFiber,
+                        core,
+                    }));
+                }
+            }
+            plane.appendChild(cells);
+            scene.appendChild(plane);
+        }
+        stage.appendChild(scene);
+        stage.addEventListener("mousedown", (e) => {
+            dragging = true; lastX = e.clientX; lastY = e.clientY;
+        });
+        return stage;
+    }
+
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        rotY += (e.clientX - lastX) * 0.5;
+        rotX -= (e.clientY - lastY) * 0.5;
+        rotX = Math.max(-80, Math.min(10, rotX));
+        lastX = e.clientX; lastY = e.clientY;
+        document.querySelectorAll(".cube-scene").forEach((s) => {
+            s.style.transform = `rotateX(${rotX}deg) rotateY(${rotY}deg)`;
+        });
+    });
+    document.addEventListener("mouseup", () => { dragging = false; });
+
+    function zLegend(cfg) {
+        const row = document.createElement("div");
+        row.className = "legend";
+        for (let z = 0; z < cfg.Z; z++) {
+            const sw = document.createElement("span");
+            sw.className = "sw";
+            sw.innerHTML =
+                `<span class="box" style="background:${colorFor(z)};border-color:${colorFor(z)}"></span>` +
+                `z=${z} → rows ${z * cfg.H}…${z * cfg.H + cfg.H - 1}`;
+            row.appendChild(sw);
+        }
+        return row;
+    }
+
+    function coreLegend(cfg) {
+        const row = document.createElement("div");
+        row.className = "legend";
+        for (let i = 0; i < cfg.nCores; i++) {
+            const sw = document.createElement("span");
+            sw.className = "sw";
+            sw.innerHTML =
+                `<span class="box" style="background:${colorFor(i)};border-color:${colorFor(i)}"></span>` +
+                `core ${i}`;
+            row.appendChild(sw);
+        }
+        return row;
+    }
+
+    function buildFlatGrid(cfg, { highlightFiber, dimOthers, colorByCore, showShardCuts }) {
+        const wrap = document.createElement("div");
+        if (showShardCuts) {
+            // Lay out shards in their grid positions
+            const gH = cfg.sharding === "height" ? cfg.nCores : cfg.gY;
+            const gW = cfg.sharding === "height" ? 1 : cfg.gX;
+            const grid = document.createElement("div");
+            grid.className = "grid2d sliced";
+            grid.style.gridTemplateColumns = `repeat(${gW}, max-content)`;
+            for (let sr = 0; sr < gH; sr++) {
+                for (let sc = 0; sc < gW; sc++) {
+                    const core = cfg.sharding === "height" ? sr : sr * cfg.gX + sc;
+                    const r0 = sr * cfg.shardH;
+                    const c0 = sc * cfg.shardW;
+                    const r1 = Math.min(cfg.physH, r0 + cfg.shardH);
+                    const c1 = Math.min(cfg.physW, c0 + cfg.shardW);
+                    const shard = document.createElement("div");
+                    shard.className = "shard";
+                    shard.style.borderColor = colorFor(core);
+                    const tag = document.createElement("div");
+                    tag.className = "shard-tag";
+                    tag.innerHTML = `shard · <strong>core ${core}</strong>`;
+                    shard.appendChild(tag);
+                    const cells = document.createElement("div");
+                    cells.style.display = "grid";
+                    cells.style.gap = "2px";
+                    cells.style.gridTemplateColumns = `repeat(${c1 - c0}, var(--cell))`;
+                    for (let r = r0; r < r1; r++) {
+                        for (let c = c0; c < c1; c++) {
+                            const z = Math.floor(r / cfg.H);
+                            const y = r % cfg.H;
+                            const x = c;
+                            const isFiber = highlightFiber && y === cfg.fy && x === cfg.fx;
+                            cells.appendChild(makeCellEl({
+                                z, y, x, r, c,
+                                label: colorByCore ? String(core) : String(z),
+                                tone: colorByCore ? "core" : "z",
+                                fiber: isFiber,
+                                stray: isFiber && colorByCore,
+                                dimmed: dimOthers && !isFiber,
+                                core,
+                            }));
+                        }
+                    }
+                    shard.appendChild(cells);
+                    grid.appendChild(shard);
+                }
+            }
+            wrap.appendChild(grid);
+            return wrap;
+        }
+
+        const grid = document.createElement("div");
+        grid.className = "grid2d";
+        grid.style.gridTemplateColumns = `repeat(${cfg.physW}, var(--cell))`;
+        for (let r = 0; r < cfg.physH; r++) {
+            for (let c = 0; c < cfg.physW; c++) {
+                const z = Math.floor(r / cfg.H);
+                const y = r % cfg.H;
+                const x = c;
+                const core = cfg.coreOf(r, c);
+                const isFiber = highlightFiber && y === cfg.fy && x === cfg.fx;
+                grid.appendChild(makeCellEl({
+                    z, y, x, r, c,
+                    label: colorByCore ? String(core) : String(z),
+                    tone: colorByCore ? "core" : "z",
+                    fiber: isFiber,
+                    stray: isFiber && colorByCore,
+                    dimmed: dimOthers && !isFiber,
+                    core: colorByCore ? core : null,
+                }));
+            }
+        }
+        wrap.appendChild(grid);
+        return wrap;
+    }
+
+    function fiberTable(cfg) {
+        const t = document.createElement("table");
+        t.className = "fiber-table";
+        t.innerHTML =
+            `<thead><tr>
+                <th>element</th><th>flat row</th><th>core</th>
+             </tr></thead>`;
+        const body = document.createElement("tbody");
+        for (const e of cfg.fiber) {
+            const tr = document.createElement("tr");
+            tr.innerHTML =
+                `<td>[${e.z}, ${e.y}, ${e.x}]</td>` +
+                `<td class="v">r = ${e.z}·${cfg.H} + ${e.y} = <strong>${e.r}</strong></td>` +
+                `<td class="bad">core ${e.core}</td>`;
+            body.appendChild(tr);
+        }
+        t.appendChild(body);
+        return t;
+    }
+
+    function render() {
+        const s = STATES[state];
+        dom.title.textContent = s.title;
+        dom.stateNum.textContent = String(state + 1);
+        dom.stateName.textContent = s.name;
+        dom.btnPrev.disabled = state === 0;
+        dom.btnNext.disabled = state === STATES.length - 1;
+        dom.dots.innerHTML = STATES.map((_, i) =>
+            `<span class="${i === state ? "on" : ""}"></span>`).join("");
+
+        const c = cfg;
+        dom.viz.innerHTML = "";
+        dom.extra.innerHTML = "";
+
+        if (s.id === "need") {
+            dom.subtitle.innerHTML =
+                `Logical tensor <code>[${c.Z}, ${c.H}, ${c.W}]</code>. ` +
+                `Max-pool along Z at spatial cell <code>(y=${c.fy}, x=${c.fx})</code> needs ` +
+                `the fiber <code>{ [z, ${c.fy}, ${c.fx}] for z = 0…${c.Z - 1} }</code> ` +
+                `<span class="ok">on one core</span> (or with known Z adjacency). ` +
+                `Drag the cube to rotate.`;
+            const wrap = document.createElement("div");
+            wrap.className = "viz";
+            const left = document.createElement("div");
+            left.className = "col";
+            left.innerHTML = "<h3>3D logical</h3>";
+            left.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge need",
+                innerHTML: `shape <em>[${c.Z}, ${c.H}, ${c.W}]</em>`,
+            }));
+            left.appendChild(zLegend(c));
+            left.appendChild(buildCube(c, {
+                tone: "z", highlightFiber: true, dimOthers: true, colorByCore: false,
+            }));
+            const right = document.createElement("div");
+            right.className = "col";
+            right.innerHTML = "<h3>Z-fiber to reduce</h3>";
+            right.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge need",
+                innerHTML: `max<sub>z</sub> at <em>(${c.fy}, ${c.fx})</em>`,
+            }));
+            const list = document.createElement("div");
+            list.className = "legend";
+            list.style.flexDirection = "column";
+            list.style.alignItems = "flex-start";
+            for (const e of c.fiber) {
+                const sw = document.createElement("span");
+                sw.className = "sw";
+                sw.innerHTML =
+                    `<span class="box" style="background:${colorFor(e.z)};border-color:${colorFor(e.z)}"></span>` +
+                    `<code>[${e.z}, ${e.y}, ${e.x}]</code>`;
+                list.appendChild(sw);
+            }
+            right.appendChild(list);
+            wrap.appendChild(left);
+            wrap.appendChild(Object.assign(document.createElement("div"), {
+                className: "arrow", textContent: "→",
+            }));
+            wrap.appendChild(right);
+            dom.viz.appendChild(wrap);
+            return;
+        }
+
+        if (s.id === "flatten") {
+            dom.subtitle.innerHTML =
+                `<code>compute_physical_shape</code> folds leading dims into height: ` +
+                `<code>[${c.Z}, ${c.H}, ${c.W}]</code> → <code>[${c.physH}, ${c.physW}]</code> ` +
+                `(= <code>[Z·H, W]</code>). The Z-fiber is no longer a local neighborhood — ` +
+                `members sit <span class="warn">H = ${c.H} rows apart</span>.`;
+            const wrap = document.createElement("div");
+            wrap.className = "viz";
+            const left = document.createElement("div");
+            left.className = "col";
+            left.innerHTML = "<h3>3D (before)</h3>";
+            left.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge need",
+                innerHTML: `<em>[${c.Z}, ${c.H}, ${c.W}]</em>`,
+            }));
+            left.appendChild(buildCube(c, {
+                highlightFiber: true, dimOthers: true, colorByCore: false,
+            }));
+            const right = document.createElement("div");
+            right.className = "col";
+            right.innerHTML = "<h3>2D physical (after fold)</h3>";
+            right.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge flat",
+                innerHTML: `<em>[${c.physH}, ${c.physW}]</em> · r = z·${c.H} + y`,
+            }));
+            right.appendChild(zLegend(c));
+            right.appendChild(buildFlatGrid(c, {
+                highlightFiber: true, dimOthers: true, colorByCore: false,
+            }));
+            wrap.appendChild(left);
+            wrap.appendChild(Object.assign(document.createElement("div"), {
+                className: "arrow", textContent: "→",
+            }));
+            wrap.appendChild(right);
+            dom.viz.appendChild(wrap);
+            dom.extra.appendChild(fiberTable(c));
+            return;
+        }
+
+        if (s.id === "shard") {
+            const gridLabel = c.sharding === "height"
+                ? `${c.nCores} cores (height)`
+                : `${c.gX}×${c.gY} (block)`;
+            dom.subtitle.innerHTML =
+                `<code>TensorSpec::${c.sharding}_sharded</code> slices the <em>folded</em> 2D shape. ` +
+                `shard = <code>[${c.shardH}, ${c.shardW}]</code> on ${gridLabel}. ` +
+                `Each shard is a contiguous rectangle in <code>(Z·H, W)</code> — ` +
+                `<span class="bad">not</span> a Z-column.`;
+            const wrap = document.createElement("div");
+            wrap.className = "viz";
+            const left = document.createElement("div");
+            left.className = "col";
+            left.innerHTML = "<h3>Physical 2D → shards</h3>";
+            left.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge flat",
+                innerHTML: `shard shape <em>[${c.shardH}, ${c.shardW}]</em>`,
+            }));
+            left.appendChild(coreLegend(c));
+            left.appendChild(buildFlatGrid(c, {
+                highlightFiber: true, dimOthers: false, colorByCore: true, showShardCuts: true,
+            }));
+            const right = document.createElement("div");
+            right.className = "col";
+            right.innerHTML = "<h3>Same fiber, by core</h3>";
+            right.appendChild(Object.assign(document.createElement("div"), {
+                className: "badge fail",
+                innerHTML: `uses <em>${c.coresUsed.size}</em> / ${c.nCores} cores`,
+            }));
+            right.appendChild(fiberTable(c));
+            wrap.appendChild(left);
+            wrap.appendChild(Object.assign(document.createElement("div"), {
+                className: "arrow", textContent: "→",
+            }));
+            wrap.appendChild(right);
+            dom.viz.appendChild(wrap);
+            return;
+        }
+
+        // fail
+        dom.subtitle.innerHTML =
+            `The max-pool-Z fiber at <code>(${c.fy}, ${c.fx})</code> is scattered across ` +
+            `<span class="bad">${c.coresUsed.size} cores</span>. A core holding one Z-plane ` +
+            `cannot see its Z-neighbors — the fold erased the third axis from the shard geometry.`;
+        const wrap = document.createElement("div");
+        wrap.className = "viz";
+        const left = document.createElement("div");
+        left.className = "col";
+        left.innerHTML = "<h3>3D colored by destination core</h3>";
+        left.appendChild(coreLegend(c));
+        left.appendChild(buildCube(c, {
+            highlightFiber: true, dimOthers: false, colorByCore: true,
+        }));
+        const right = document.createElement("div");
+        right.className = "col";
+        right.innerHTML = "<h3>Folded + sharded</h3>";
+        right.appendChild(buildFlatGrid(c, {
+            highlightFiber: true, dimOthers: false, colorByCore: true, showShardCuts: true,
+        }));
+        wrap.appendChild(left);
+        wrap.appendChild(Object.assign(document.createElement("div"), {
+            className: "arrow", textContent: "≠",
+        }));
+        wrap.appendChild(right);
+        dom.viz.appendChild(wrap);
+
+        const v = document.createElement("div");
+        v.className = "verdict";
+        v.innerHTML =
+            `<h3>Why 2D sharding can't host Z max-pool</h3>` +
+            `<p>` +
+            `<code>ShardSpec</code> only stores a <em>2D</em> shape after folding ` +
+            `<code>[:-2]</code> into Y. <code>height_sharded</code> / ` +
+            `<code>block_sharded</code> then cut that 2D rectangle. Z-adjacent elements ` +
+            `at fixed <code>(y,x)</code> become rows <code>y, y+H, y+2H, …</code> — ` +
+            `spaced by the spatial height — so they fall into different height/block shards.` +
+            `</p>` +
+            `<p style="margin-top:8px">` +
+            `Fix path: keep rank with <code>NdShardSpec</code> / ` +
+            `<code>TensorSpec::sharded</code> so a shard can own the full Z axis ` +
+            `(e.g. shard shape <code>[${c.Z}, …]</code> or shard across H/W only).` +
+            `</p>` +
+            `<div class="fix">fiber cores: <span>${[...c.coresUsed].sort((a,b)=>a-b).join(", ")}</span>` +
+            ` &nbsp;·&nbsp; need 1 core for a local Z reduce</div>`;
+        dom.extra.appendChild(v);
+        dom.extra.appendChild(fiberTable(c));
+    }
+
+    function goTo(i) {
+        state = Math.max(0, Math.min(STATES.length - 1, i));
+        render();
+    }
+
+    function apply() {
+        cfg = readCfg();
+        goTo(state);
+    }
+
+    async function play() {
+        if (playing) {
+            playing = false;
+            clearTimeout(playTimer);
+            dom.btnPlay.textContent = "Play";
+            return;
+        }
+        playing = true;
+        dom.btnPlay.textContent = "Pause";
+        if (state === STATES.length - 1) goTo(0);
+        while (playing && state < STATES.length - 1) {
+            await sleep(state === 0 ? 900 : 1400);
+            if (!playing) break;
+            goTo(state + 1);
+        }
+        playing = false;
+        dom.btnPlay.textContent = "Play";
+    }
+
+    document.getElementById("btnApply").onclick = () => { apply(); };
+    document.getElementById("btnReset").onclick = () => { goTo(0); };
+    dom.btnPrev.onclick = () => goTo(state - 1);
+    dom.btnNext.onclick = () => goTo(state + 1);
+    dom.btnPlay.onclick = play;
+    dom.sharding.onchange = () => {
+        if (dom.sharding.value === "height") {
+            dom.gridX.value = 1;
+            if (+dom.gridY.value < 2) dom.gridY.value = 4;
+        } else {
+            dom.gridX.value = 2;
+            dom.gridY.value = 2;
+        }
+        apply();
+    };
+
+    apply();
+    goTo(0);
+})();
+</script>
+</body>
+</html>
