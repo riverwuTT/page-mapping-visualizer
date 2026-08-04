@@ -702,10 +702,8 @@
                 <button id="btnPrev">← Prev</button>
                 <button id="btnNext" class="primary">Next →</button>
                 <button id="btnPlay">Play</button>
-                <span class="state-label">Step <strong id="stateNum">1</strong> / 6 — <span id="stateName">input</span></span>
-                <div class="dots" id="dots" aria-hidden="true">
-                    <span class="on"></span><span></span><span></span><span></span><span></span><span></span><span></span>
-                </div>
+                <span class="state-label">Step <strong id="stateNum">1</strong> / <span id="stateTotal">6</span> — <span id="stateName">input</span></span>
+                <div class="dots" id="dots" aria-hidden="true"></div>
             </div>
 
             <div class="stage">
@@ -748,23 +746,26 @@
         "rm-height":   { logicalShape: "2,3,5", layout: "ROW_MAJOR", tileH: 2, tileW: 2, sharding: "height", configBy: "grid", gridX: 2, gridY: 2, shardH: "", shardW: "", alignMode: "default" },
     };
 
-    // Display labels for the walkthrough states (incl. 3.5).
-    const STEP_LABELS = ["1", "2", "3", "3.5", "4", "5", "6"];
-
-    const STATES = [
-        { name: "input",   title: "① Input — logical shape" },
-        { name: "align",   title: "② Align — logical → padded" },
-        { name: "flatten", title: "③ Flatten — ND → 2D" },
-        { name: "compare", title: "③½ Before / after squash" },
-        { name: "slice",   title: "④ Slice — 2D → shards" },
-        { name: "map",     title: "⑤ Map — shards → cores" },
-        { name: "core map", title: "⑥ Result — tensor colored by core" },
+    // Full walkthrough catalog. Align / flatten(+compare) are included only when
+    // needed (see rebuildWalkthrough).
+    const ALL_STEPS = [
+        { id: "input",   name: "input",    title: "① Input — logical shape" },
+        { id: "align",   name: "align",    title: "② Align — logical → padded", needsPad: true },
+        { id: "flatten", name: "flatten",  title: "③ Flatten — ND → 2D", needsFlatten: true },
+        { id: "compare", name: "compare",  title: "③½ Before / after squash", needsFlatten: true },
+        { id: "slice",   name: "slice",    title: "④ Slice — 2D → shards" },
+        { id: "map",     name: "map",      title: "⑤ Map — shards → cores" },
+        { id: "coremap", name: "core map", title: "⑥ Result — tensor colored by core" },
     ];
 
+    let STATES = ALL_STEPS.slice();
+    let STEP_LABELS = [];
     let cfg = null;
     let result = null;
     let meta = null;
     let state = 0;
+    let padStepEnabled = true;
+    let flattenStepEnabled = true;
     let playing = false;
     let playTimer = null;
     let dealToken = 0;
@@ -810,12 +811,127 @@
         tensorSub: document.getElementById("tensorSub"),
         coresSub: document.getElementById("coresSub"),
         coresLabel: document.getElementById("coresLabel"),
-        dots: [...document.getElementById("dots").children],
+        dots: document.getElementById("dots"),
+        stateTotal: document.getElementById("stateTotal"),
         btnPrev: document.getElementById("btnPrev"),
         btnNext: document.getElementById("btnNext"),
         btnPlay: document.getElementById("btnPlay"),
         tileOnly: document.querySelector(".tile-only"),
     };
+
+    function shapesEqual(a, b) {
+        return !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+    }
+
+    // Padding step is enabled only when Alignment actually grows the shape.
+    function needsPaddingStep(res) {
+        return !shapesEqual(res.logicalShape, res.paddedShape);
+    }
+
+    // Flatten (+ before/after compare) only when the tensor is still ND.
+    function needsFlattenStep(res) {
+        const lr = (res.logicalShape || []).length;
+        const pr = (res.paddedShape || []).length;
+        return Math.max(lr, pr) > 2;
+    }
+
+    function stepId(idx) {
+        const st = STATES[idx != null ? idx : state];
+        return st ? st.id : null;
+    }
+
+    function indexOfStep(id) {
+        return STATES.findIndex((s) => s.id === id);
+    }
+
+    // Rebuild STATES / labels / dots from pad + flatten flags.
+    function rebuildWalkthrough({ keepId } = {}) {
+        const prevId = keepId || stepId();
+        padStepEnabled = !!(result && needsPaddingStep(result));
+        flattenStepEnabled = !!(result && needsFlattenStep(result));
+        STATES = ALL_STEPS.filter((s) =>
+            (!s.needsPad || padStepEnabled) &&
+            (!s.needsFlatten || flattenStepEnabled));
+
+        // Renumber display labels for the active subset.
+        // Key = `${pad?1:0}${flatten?1:0}`
+        const labelTables = {
+            "11": { // pad + flatten (full)
+                input: "1", align: "2", flatten: "3", compare: "3.5",
+                slice: "4", map: "5", coremap: "6",
+            },
+            "01": { // no pad, flatten
+                input: "1", flatten: "2", compare: "2.5",
+                slice: "3", map: "4", coremap: "5",
+            },
+            "10": { // pad, already 2D (no flatten)
+                input: "1", align: "2",
+                slice: "3", map: "4", coremap: "5",
+            },
+            "00": { // no pad, already 2D
+                input: "1",
+                slice: "2", map: "3", coremap: "4",
+            },
+        };
+        const titleTables = {
+            "11": null, // use ALL_STEPS titles
+            "01": {
+                input: "① Input — logical shape",
+                flatten: "② Flatten — ND → 2D",
+                compare: "②½ Before / after squash",
+                slice: "③ Slice — 2D → shards",
+                map: "④ Map — shards → cores",
+                coremap: "⑤ Result — tensor colored by core",
+            },
+            "10": {
+                input: "① Input — logical shape",
+                align: "② Align — logical → padded",
+                slice: "③ Slice — 2D → shards",
+                map: "④ Map — shards → cores",
+                coremap: "⑤ Result — tensor colored by core",
+            },
+            "00": {
+                input: "① Input — logical shape",
+                slice: "② Slice — 2D → shards",
+                map: "③ Map — shards → cores",
+                coremap: "④ Result — tensor colored by core",
+            },
+        };
+        const key = `${padStepEnabled ? 1 : 0}${flattenStepEnabled ? 1 : 0}`;
+        const lab = labelTables[key];
+        const titles = titleTables[key];
+        STEP_LABELS = STATES.map((s) => lab[s.id] || s.id);
+        STATES = STATES.map((s) => ({
+            ...s,
+            title: (titles && titles[s.id]) || s.title,
+            label: lab[s.id],
+        }));
+
+        // Dots
+        dom.dots.innerHTML = "";
+        for (let i = 0; i < STATES.length; i++) {
+            const span = document.createElement("span");
+            if (i === 0) span.className = "on";
+            dom.dots.appendChild(span);
+        }
+        dom.stateTotal.textContent = String(STEP_LABELS[STEP_LABELS.length - 1] || STATES.length);
+
+        // Restore position by step id when possible.
+        let next = indexOfStep(prevId);
+        if (next < 0) {
+            // Skipped step → land on the next still-active stage.
+            const fallback =
+                prevId === "align" ? ["flatten", "slice"] :
+                (prevId === "flatten" || prevId === "compare") ? ["slice"] :
+                [];
+            next = 0;
+            for (const id of fallback) {
+                const i = indexOfStep(id);
+                if (i >= 0) { next = i; break; }
+            }
+        }
+        state = next;
+    }
 
     function parseInts(s) {
         const parts = String(s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -1074,6 +1190,12 @@
         } else {
             dom.alignHint.innerHTML =
                 `Enter a custom <code>Alignment</code> below.`;
+        }
+        if (result) {
+            const on = needsPaddingStep(result);
+            dom.alignHint.innerHTML += on
+                ? ` <span style="color:var(--accent)">Align step enabled</span> (logical ≠ padded).`
+                : ` <span style="opacity:.8">No padding — align step skipped.</span>`;
         }
     }
 
@@ -1878,17 +2000,19 @@
 
     function updateChrome() {
         const st = STATES[state];
+        const id = st.id;
         dom.stateNum.textContent = STEP_LABELS[state] || String(state + 1);
         dom.stateName.textContent = st.name;
         dom.leftTitle.textContent = st.title;
         renderSummary(result);
-        dom.dots.forEach((d, i) => d.classList.toggle("on", i === state));
+        [...dom.dots.children].forEach((d, i) => d.classList.toggle("on", i === state));
         dom.btnPrev.disabled = state === 0 || playing;
         dom.btnNext.disabled = state === STATES.length - 1 || playing;
 
-        // Steps 3 → 4: omit core grid (cores arrive in step 5).
+        // Flatten / compare / slice: omit core grid (cores arrive at map).
         const stageEl = document.querySelector(".stage");
-        stageEl.classList.toggle("solo-tensor", state === 2 || state === 3 || state === 4);
+        stageEl.classList.toggle("solo-tensor",
+            id === "flatten" || id === "compare" || id === "slice");
 
         const kind = result.memoryLayout.replace("_SHARDED", "").toLowerCase();
         dom.coresLabel.textContent = `(${meta.gridX}×${meta.gridY})`;
@@ -1896,31 +2020,39 @@
         dom.coresSub.textContent =
             `${kind}-sharded · ${result.distribution} · ${orient} · ${result.mapping.numShards} shards`;
 
-        if (state === 0) {
+        if (id === "input") {
             const cubeOn = dom.cube3d.checked && result.logicalShape.length === 3;
+            const noPad = !needsPaddingStep(result);
+            const noFlat = !needsFlattenStep(result);
+            const skips = [];
+            if (noPad) skips.push("no pad step");
+            if (noFlat) skips.push("no flatten step");
             dom.tensorSub.innerHTML =
                 `<span class="shape-pill">logical <em>[${result.logicalShape.join(",")}]</em></span>` +
                 (cubeOn
                     ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em> of input layers`
-                    : ` · original input (no padding)`);
-        } else if (state === 1) {
+                    : ` · original input`) +
+                (skips.length
+                    ? ` · <span style="opacity:.8">${skips.join(" · ")}</span>`
+                    : "");
+        } else if (id === "align") {
             dom.tensorSub.innerHTML = alignLegendHtml() + shapePills() +
                 (result.paddedShape.length === 3
                     ? ` · <em style="color:var(--accent);font-style:normal">3D cube</em>`
                     : ` · padded ND`);
-        } else if (state === 2) {
+        } else if (id === "flatten") {
             dom.tensorSub.innerHTML = shapePills() +
                 ` · high <code>z</code> leaves first · 3D stays empty when drained`;
-        } else if (state === 3) {
+        } else if (id === "compare") {
             dom.tensorSub.innerHTML =
                 `<span class="dim-badge before">before <em>[${result.paddedShape.join(",")}]</em></span>` +
                 ` → ` +
                 `<span class="dim-badge after">after <em>[${result.physical.join(",")}]</em></span>`;
-        } else if (state === 4) {
+        } else if (id === "slice") {
             dom.tensorSub.innerHTML =
                 `${result.mapping.numShards} shards · each ~[${(result.ndShardShape || []).join(",")}] elem` +
                 ` · page ${result.pageShape.join("×")}`;
-        } else if (state === 5) {
+        } else if (id === "map") {
             dom.tensorSub.innerHTML = shapePills() + ` · shards dealt to cores`;
         } else {
             dom.tensorSub.innerHTML =
@@ -2291,56 +2423,60 @@
         clearHover();
         document.querySelectorAll(".flyer").forEach((f) => f.remove());
 
-        const prev = state;
+        const prevId = stepId();
         state = next;
+        const id = stepId();
         updateChrome();
 
-        if (state === 0) {
+        if (id === "input") {
             rotX = -20;
             rotY = -28;
             buildNdView({ mode: "logical", colored: false, showPages: false });
             clearCoreSlots();
-        } else if (state === 1) {
-            // Align: logical vs pad colors; pads blink
-            if (animate && prev === 0) {
+        } else if (id === "align") {
+            // Align: logical vs pad colors; pads blink (only when padding exists).
+            if (animate && prevId === "input") {
                 await animateAlign({ fromLogical: true });
             } else {
                 buildNdView({ mode: "padded", colored: false, showPages: false, alignTone: "blink" });
             }
             clearCoreSlots();
-        } else if (state === 2) {
+        } else if (id === "flatten") {
             // Flatten: high-z leaves first; settle with empty 3D + filled 2D
-            if (animate && (prev === 1 || prev === 0)) {
+            if (animate && (prevId === "align" || prevId === "input")) {
                 await animateFlatten();
             } else {
                 buildFlattenEndView();
             }
             clearCoreSlots();
-        } else if (state === 3) {
-            // 3.5 — before (full 3D) vs after (2D); loop high→low z flash on both
+        } else if (id === "compare") {
+            // Before (full 3D) vs after (2D); loop high→low z flash on both
             buildCompareView();
             clearCoreSlots();
             void runCompareFlashLoop();
-        } else if (state === 4) {
+        } else if (id === "slice") {
             rotX = -20;
             rotY = -28;
-            if (animate && (prev === 3 || prev === 2)) {
+            // May arrive from compare/flatten, or directly from align/input when
+            // those earlier stages were skipped (no pad / already 2D).
+            if (animate && (prevId === "compare" || prevId === "flatten" ||
+                    prevId === "align" || prevId === "input")) {
                 await animateSlice();
             } else {
                 buildSlicedView({ colored: false, ghost: false });
             }
             clearCoreSlots();
-        } else if (state === 5) {
-            if (animate && prev === 4) {
+        } else if (id === "map") {
+            if (animate && prevId === "slice") {
                 await animateDeal();
             } else {
                 buildSlicedView({ colored: false, ghost: true });
                 fillCoreSlots();
             }
-        } else if (state === 6) {
+        } else if (id === "coremap") {
             // Result: original tensor colored by core; cores keep live shards.
             const token = dealToken;
-            if (animate && prev === 5) {
+            if (animate && prevId === "map") {
                 await sleep(280);
                 if (token !== dealToken) return;
             }
@@ -2365,15 +2501,14 @@
             if (!playing) break;
             if (state < STATES.length - 1) {
                 await new Promise((resolve) => {
-                    // Longer holds after align (blink) and flatten (collapse) animations.
-                    // Step 3.5: hold long enough for a full high→low pass over all z planes.
+                    const id = stepId();
                     const zHold = Math.max(1600, numZPlanes() * 800 + 400);
-                    const hold = state === 1 ? 1400
-                        : state === 2 ? 900
-                        : state === 3 ? zHold
-                        : state === 4 ? 900
-                        : state === 5 ? 400
-                        : state === 6 ? 1200
+                    const hold = id === "align" ? 1400
+                        : id === "flatten" ? 900
+                        : id === "compare" ? zHold
+                        : id === "slice" ? 900
+                        : id === "map" ? 400
+                        : id === "coremap" ? 1200
                         : 1100;
                     playTimer = setTimeout(resolve, hold);
                 });
@@ -2406,7 +2541,10 @@
             if (dom.alignment.value.trim()) p.push("align=" + shapeEnc(dom.alignment.value));
         }
         if (!dom.cube3d.checked) p.push("cube3d=0");
-        if (state > 0) p.push("step=" + (STEP_LABELS[state] || String(state + 1)));
+        if (state > 0) {
+            // Prefer stable step id so links survive pad-step being toggled.
+            p.push("step=" + (stepId() || STEP_LABELS[state] || String(state + 1)));
+        }
         return p.join(",");
     }
 
@@ -2467,21 +2605,28 @@
         setV(dom.alignment, obj.align && shapeDec(obj.align));
         dom.cube3d.checked = obj.cube3d !== "0";
 
-        let stepIdx = 0;
-        if (obj.step != null) {
-            const label = String(obj.step);
-            const found = STEP_LABELS.indexOf(label);
-            if (found >= 0) stepIdx = found;
-            else {
-                const n = Number(label);
-                if (Number.isInteger(n) && n >= 1 && n <= STATES.length) stepIdx = n - 1;
-            }
-        }
-        return stepIdx;
+        // Return a step id (preferred) or a legacy label/number for resolveStepRef.
+        if (obj.step != null) return String(obj.step);
+        return null;
     }
 
-    function recompute({ fromHash = false, stepIdx = 0 } = {}) {
+    function resolveStepRef(ref) {
+        if (ref == null || ref === "") return 0;
+        const s = String(ref);
+        // Stable ids: input, align, flatten, …
+        let found = indexOfStep(s);
+        if (found >= 0) return found;
+        // Display labels: "3.5", "2", …
+        found = STEP_LABELS.indexOf(s);
+        if (found >= 0) return found;
+        const n = Number(s);
+        if (Number.isInteger(n) && n >= 1 && n <= STATES.length) return n - 1;
+        return 0;
+    }
+
+    function recompute({ fromHash = false, stepIdx = 0, stepRef = null } = {}) {
         dom.cfgError.textContent = "";
+        const keepId = stepRef || stepId() || ALL_STEPS[Math.max(0, stepIdx | 0)]?.id;
         try {
             cfg = readCfg();
             cfg.alignment = resolveAlignment(cfg);
@@ -2512,8 +2657,22 @@
         document.documentElement.style.setProperty("--cell-h", ch + "px");
 
         syncDerivedHints(result);
+        syncAlignMode();
+        rebuildWalkthrough({ keepId });
         buildCoresSkeleton();
-        const next = Math.max(0, Math.min(STATES.length - 1, stepIdx | 0));
+        // rebuildWalkthrough already clamped `state` by keepId (e.g. align → flatten
+        // when padding vanishes). Only re-resolve when the hash explicitly asks for
+        // a step that still exists in the new walkthrough.
+        let next = state;
+        if (stepRef != null) {
+            const resolved = indexOfStep(String(stepRef));
+            if (resolved >= 0) next = resolved;
+            else {
+                const byLabel = STEP_LABELS.indexOf(String(stepRef));
+                if (byLabel >= 0) next = byLabel;
+                // else keep rebuildWalkthrough's fallback (already in `state`)
+            }
+        }
         goTo(next, { animate: false });
         if (!fromHash) updateHash();
         else lastHash = encodeHash();
@@ -2542,7 +2701,7 @@
     };
 
     // ---- wire controls ----
-    document.getElementById("btnApply").addEventListener("click", () => recompute({ stepIdx: state }));
+    document.getElementById("btnApply").addEventListener("click", () => recompute({ stepRef: stepId() }));
     document.getElementById("btnReset").addEventListener("click", () => goTo(0, { animate: false }));
     dom.btnPrev.addEventListener("click", () => { if (state > 0) goTo(state - 1, { animate: false }); });
     dom.btnNext.addEventListener("click", () => { if (state < STATES.length - 1) goTo(state + 1, { animate: true }); });
@@ -2553,8 +2712,8 @@
     dom.orientation.addEventListener("change", syncConfigMode);
     dom.alignMode.addEventListener("change", syncAlignMode);
     dom.cube3d.addEventListener("change", () => {
-        // Align / core-map force 3D for rank-3; checkbox mainly affects the input step.
-        if (state === 0 || state === 1 || state === 6) goTo(state, { animate: false });
+        const id = stepId();
+        if (id === "input" || id === "align" || id === "coremap") goTo(state, { animate: false });
         else { updateChrome(); updateHash(); }
     });
     document.querySelectorAll("#presets button").forEach((btn) => {
@@ -2564,22 +2723,22 @@
     window.addEventListener("hashchange", () => {
         const raw = (location.hash || "").replace(/^#/, "");
         if (raw === lastHash) return;
-        const stepIdx = applyHash();
+        const stepRef = applyHash();
         syncTileField();
         syncConfigMode();
         syncAlignMode();
-        recompute({ fromHash: true, stepIdx: stepIdx || 0 });
+        recompute({ fromHash: true, stepRef });
     });
 
     syncTileField();
     syncConfigMode();
     syncAlignMode();
     {
-        const stepIdx = applyHash();
+        const stepRef = applyHash();
         syncTileField();
         syncConfigMode();
         syncAlignMode();
-        recompute({ fromHash: !!location.hash, stepIdx: stepIdx || 0 });
+        recompute({ fromHash: !!location.hash, stepRef });
     }
 })();
     </script>
