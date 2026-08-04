@@ -185,6 +185,55 @@
             cursor: pointer;
             position: relative;
         }
+        .cell.logical-tone {
+            background: #2a4a6e;
+            border-color: #4ea1ff;
+            color: #cfe6ff;
+        }
+        .cell.pad, .cell.pad-tone {
+            background: #5a3a12;
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,200,80,.12) 0 5px, transparent 5px 10px);
+            border-color: #e3a020;
+            border-style: dashed;
+            color: #f0d090;
+        }
+        .cell.pad-blink {
+            animation: padBlink 1s ease-in-out infinite;
+        }
+        @keyframes padBlink {
+            0%, 100% { filter: brightness(1); box-shadow: none; }
+            50% {
+                filter: brightness(1.55);
+                box-shadow: 0 0 0 2px #ffc14a, 0 0 12px rgba(255, 180, 40, .55);
+            }
+        }
+        .swatch-row {
+            display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px;
+            font-size: 12px; color: var(--muted);
+        }
+        .swatch-row .sw { display: inline-flex; align-items: center; gap: 6px; }
+        .swatch-row .box {
+            width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border);
+        }
+        .swatch-row .box.logical { background: #2a4a6e; border-color: #4ea1ff; }
+        .swatch-row .box.padded {
+            background: #5a3a12;
+            background-image: repeating-linear-gradient(
+                45deg, rgba(255,200,80,.2) 0 4px, transparent 4px 8px);
+            border-color: #e3a020; border-style: dashed;
+        }
+        .shape-pill {
+            display: inline-block;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            padding: 1px 7px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            color: var(--muted);
+            margin-right: 6px;
+        }
+        .shape-pill em { color: var(--accent); font-style: normal; }
 
         /* ---- hover modes ---- */
         /* Tensor: individual element */
@@ -296,9 +345,10 @@
     <header>
         <h1>tt-metal interleaved mapping</h1>
         <p>
-            Step through how an interleaved tensor is sliced into pages and dealt
-            round-robin onto cores. Configure tensor size, page layout
-            (<code>ROW_MAJOR</code> / <code>TILE</code>), tile size, and core count.
+            Step through how an interleaved tensor is aligned (padded), sliced into
+            pages, and dealt round-robin onto cores. Configure tensor size, page
+            layout (<code>ROW_MAJOR</code> / <code>TILE</code>), alignment, tile
+            size, and core count.
         </p>
         <nav class="topnav">
             <a href="index.html">Overview</a>
@@ -315,6 +365,7 @@
             <div class="field">
                 <div class="preset-btns" id="presets">
                     <button type="button" data-preset="tile">12×4 / 4×4 TILE</button>
+                    <button type="button" data-preset="tile-pad">10×5 / 4×4 TILE (pad)</button>
                     <button type="button" data-preset="rm">8×3 ROW_MAJOR</button>
                 </div>
             </div>
@@ -344,6 +395,24 @@
                     <input id="inTileW" type="number" min="1" max="16" value="4" title="tile cols" />
                 </div>
             </div>
+            <div class="field">
+                <label>Alignment</label>
+                <select id="alignMode">
+                    <option value="default" selected>default</option>
+                    <option value="custom">custom</option>
+                </select>
+                <div class="hint" id="alignHint">
+                    <code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row width).
+                </div>
+            </div>
+            <div class="field" id="customAlignField" style="display:none">
+                <label>Custom alignment</label>
+                <input id="alignment" placeholder="e.g. 8,8" />
+                <div class="hint">
+                    Passed as <code>TensorLayout(..., alignment)</code>; merged via
+                    <code>initialize_alignment</code>.
+                </div>
+            </div>
 
             <div class="grp">Cores</div>
             <div class="field">
@@ -362,10 +431,8 @@
                 <button id="btnPrev">← Prev</button>
                 <button id="btnNext" class="primary">Next →</button>
                 <button id="btnPlay">Play</button>
-                <span class="state-label">State <strong id="stateNum">1</strong> / 4 — <span id="stateName">whole tensor</span></span>
-                <div class="dots" id="dots" aria-hidden="true">
-                    <span class="on"></span><span></span><span></span><span></span>
-                </div>
+                <span class="state-label">State <strong id="stateNum">1</strong> / <span id="stateTotal">4</span> — <span id="stateName">whole tensor</span></span>
+                <div class="dots" id="dots" aria-hidden="true"></div>
             </div>
 
             <div class="stage">
@@ -384,6 +451,8 @@
         </div>
     </div>
 
+    <script src="page_mapping.js"></script>
+    <script src="tensor_mapping.js"></script>
     <script>
     const PALETTE = [
         "#4ea1ff", "#7ee787", "#ffa657", "#d2a8ff",
@@ -398,6 +467,10 @@
     const inTileH = document.getElementById("inTileH");
     const inTileW = document.getElementById("inTileW");
     const inCores = document.getElementById("inCores");
+    const alignModeEl = document.getElementById("alignMode");
+    const alignHint = document.getElementById("alignHint");
+    const customAlignField = document.getElementById("customAlignField");
+    const alignmentEl = document.getElementById("alignment");
     const tileField = document.getElementById("tileField");
     const cfgError = document.getElementById("cfgError");
 
@@ -405,13 +478,21 @@
     const coresEl = document.getElementById("cores");
     const captionEl = document.getElementById("caption");
     const stateNum = document.getElementById("stateNum");
+    const stateTotal = document.getElementById("stateTotal");
     const stateName = document.getElementById("stateName");
-    const dots = [...document.getElementById("dots").children];
+    const dotsEl = document.getElementById("dots");
     const btnPrev = document.getElementById("btnPrev");
     const btnNext = document.getElementById("btnNext");
     const btnPlay = document.getElementById("btnPlay");
 
-    /** @type {{ rows:number, cols:number, layout:string, pageH:number, pageW:number, pagesH:number, pagesW:number, numPages:number, numCores:number }} */
+    const ALL_STEPS = [
+        { id: "input", name: "whole tensor" },
+        { id: "align", name: "align — logical → padded", needsPad: true },
+        { id: "slice", name: "sliced into pages" },
+        { id: "deal", name: "dealt to cores" },
+        { id: "coremap", name: "tensor as core map" },
+    ];
+    let STATES = ALL_STEPS.slice();
     let cfg = null;
     let state = 0;
     let playing = false;
@@ -512,9 +593,35 @@
         }
     });
 
+    function parseAlign(s) {
+        const parts = String(s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+        if (!parts.length) return [];
+        const nums = parts.map(Number);
+        if (nums.some((n) => !Number.isInteger(n) || n < 1)) {
+            throw new Error("alignment dims must be positive integers");
+        }
+        return nums;
+    }
+
     function syncLayoutFields() {
         const tile = inLayout.value === "TILE";
         tileField.classList.toggle("disabled", !tile);
+    }
+
+    function syncAlignMode() {
+        const mode = alignModeEl.value === "custom" ? "custom" : "default";
+        customAlignField.style.display = mode === "custom" ? "" : "none";
+        if (mode === "default") {
+            alignHint.innerHTML =
+                `<code>Alignment{}</code> → <code>create_default_alignment</code> (tile or RM row width).`;
+        } else {
+            alignHint.innerHTML = `Enter a custom <code>Alignment</code> below.`;
+        }
+        if (cfg) {
+            alignHint.innerHTML += cfg.hasPadding
+                ? ` <span style="color:var(--accent)">Align step enabled</span> (logical ≠ padded).`
+                : ` <span style="opacity:.8">No padding — align step skipped.</span>`;
+        }
     }
 
     function readForm() {
@@ -525,44 +632,66 @@
             tileH: Number(inTileH.value),
             tileW: Number(inTileW.value),
             numCores: Number(inCores.value),
+            alignMode: alignModeEl.value === "custom" ? "custom" : "default",
+            alignStr: alignmentEl.value.trim(),
         };
     }
 
     function validate(raw) {
-        const { rows, cols, layout, tileH, tileW, numCores } = raw;
+        const { rows, cols, layout, tileH, tileW, numCores, alignMode, alignStr } = raw;
         if (![rows, cols, numCores].every((n) => Number.isInteger(n) && n >= 1)) {
             return "Tensor size and cores must be positive integers.";
         }
-        if (rows > 32 || cols > 16) return "Keep tensor ≤ 32×16 so the stage stays readable.";
         if (numCores > 16) return "Keep cores ≤ 16.";
         if (layout === "TILE") {
             if (![tileH, tileW].every((n) => Number.isInteger(n) && n >= 1)) {
                 return "Tile size must be positive integers.";
             }
-            if (rows % tileH !== 0 || cols % tileW !== 0) {
-                return `Tensor ${rows}×${cols} must be divisible by tile ${tileH}×${tileW}.`;
-            }
-            if (tileH > rows || tileW > cols) return "Tile size cannot exceed tensor size.";
+        }
+        if (alignMode === "custom") {
+            if (!alignStr) return "Custom alignment needs a value, e.g. 8,8.";
+            try { parseAlign(alignStr); }
+            catch (e) { return e.message || String(e); }
         }
         return null;
     }
 
     function buildCfg(raw) {
-        const layout = raw.layout;
-        const pageH = layout === "TILE" ? raw.tileH : 1;
-        const pageW = layout === "TILE" ? raw.tileW : raw.cols;
-        const pagesH = raw.rows / pageH;
-        const pagesW = raw.cols / pageW;
+        const alignment = raw.alignMode === "custom" ? parseAlign(raw.alignStr) : [];
+        const tm = TensorMapping.computeTensorMapping({
+            logicalShape: [raw.rows, raw.cols],
+            layout: raw.layout === "ROW_MAJOR" ? "ROW_MAJOR" : "TILE",
+            tile: [raw.tileH || 4, raw.tileW || 4],
+            dtype: "BFLOAT16",
+            sharding: "interleave",
+            bankGrid: { x: raw.numCores, y: 1 },
+            alignment,
+        });
+        const [rows, cols] = tm.physical;
+        const [pageH, pageW] = tm.pageShape;
+        const [pagesH, pagesW] = tm.tensor2dInPages;
+        if (rows > 32 || cols > 16) {
+            throw new Error(
+                `Padded physical ${rows}×${cols} is too large for the stage (keep ≤ 32×16).`
+            );
+        }
         return {
-            rows: raw.rows,
-            cols: raw.cols,
-            layout,
+            logicalRows: raw.rows,
+            logicalCols: raw.cols,
+            rows,
+            cols,
+            paddedShape: tm.paddedShape.slice(),
+            alignment: tm.alignment.slice(),
+            alignMode: raw.alignMode,
+            layout: tm.layout,
             pageH,
             pageW,
             pagesH,
             pagesW,
             numPages: pagesH * pagesW,
             numCores: raw.numCores,
+            hasPadding: raw.rows !== rows || raw.cols !== cols,
+            isPad: (r, c) => tm.element.isPadding(r, c),
         };
     }
 
@@ -574,27 +703,68 @@
         return `${cfg.pageH}×${cfg.pageW}`;
     }
 
-    function statesFor() {
+    function stepId(idx) {
+        const st = STATES[idx != null ? idx : state];
+        return st ? st.id : null;
+    }
+
+    function indexOfStep(id) {
+        return STATES.findIndex((s) => s.id === id);
+    }
+
+    function rebuildWalkthrough({ keepId } = {}) {
+        const prevId = keepId || stepId();
+        const withPad = !!(cfg && cfg.hasPadding);
+        STATES = ALL_STEPS.filter((s) => !s.needsPad || withPad).map((s) => {
+            if (s.id === "slice") {
+                return {
+                    ...s,
+                    name: cfg.layout === "TILE" ? "sliced into tiles" : "sliced row-wise",
+                };
+            }
+            return { ...s };
+        });
+        dotsEl.innerHTML = "";
+        for (let i = 0; i < STATES.length; i++) {
+            const span = document.createElement("span");
+            if (i === 0) span.className = "on";
+            dotsEl.appendChild(span);
+        }
+        stateTotal.textContent = String(STATES.length);
+        let next = indexOfStep(prevId);
+        if (next < 0) {
+            next = prevId === "align" ? Math.max(0, indexOfStep("slice")) : 0;
+        }
+        state = next;
+    }
+
+    function captionFor(id) {
         const unit = cfg.layout === "TILE" ? "tile" : "row";
         const unitPlural = cfg.layout === "TILE" ? "tiles" : "row pages";
-        return [
-            {
-                name: "whole tensor",
-                caption: `<strong>State 1.</strong> Introduce a <code>${cfg.rows}×${cfg.cols}</code> tensor in <code>${cfg.layout}</code> layout. Cores sit empty on the right.`,
-            },
-            {
-                name: cfg.layout === "TILE" ? "sliced into tiles" : "sliced row-wise",
-                caption: `<strong>State 2.</strong> Cut into <code>${pageLabel()}</code> pages — a <code>${cfg.pagesH}×${cfg.pagesW}</code> page grid (<code>${cfg.numPages}</code> ${unitPlural}). Gaps show the cut.`,
-            },
-            {
-                name: "dealt to cores",
-                caption: `<strong>State 3.</strong> Deal ${unitPlural} round-robin: ${unit} <code>i → core (i % ${cfg.numCores})</code>.`,
-            },
-            {
-                name: "tensor as core map",
-                caption: `<strong>State 4.</strong> Original tensor returns, colored by destination core. Cores keep their dealt pages.`,
-            },
-        ];
+        const n = indexOfStep(id) + 1;
+        if (id === "input") {
+            return `<strong>State ${n}.</strong> Introduce logical <code>${cfg.logicalRows}×${cfg.logicalCols}</code> ` +
+                `in <code>${cfg.layout}</code> layout` +
+                (cfg.hasPadding
+                    ? ` (will pad to <code>${cfg.rows}×${cfg.cols}</code>).`
+                    : ` — already aligned, no pad step.`) +
+                ` Cores sit empty on the right.`;
+        }
+        if (id === "align") {
+            return `<strong>State ${n}.</strong> <code>compute_padded_shape</code>: logical ` +
+                `<code>${cfg.logicalRows}×${cfg.logicalCols}</code> → padded ` +
+                `<code>${cfg.rows}×${cfg.cols}</code> with alignment ` +
+                `<code>[${cfg.alignment.join(", ")}]</code>. Blue = logical; amber (blinking) = padding.`;
+        }
+        if (id === "slice") {
+            return `<strong>State ${n}.</strong> Cut into <code>${pageLabel()}</code> pages — a ` +
+                `<code>${cfg.pagesH}×${cfg.pagesW}</code> page grid (<code>${cfg.numPages}</code> ${unitPlural}). Gaps show the cut.`;
+        }
+        if (id === "deal") {
+            return `<strong>State ${n}.</strong> Deal ${unitPlural} round-robin: ${unit} ` +
+                `<code>i → core (i % ${cfg.numCores})</code>.`;
+        }
+        return `<strong>State ${n}.</strong> Original tensor returns, colored by destination core. Cores keep their dealt pages.`;
     }
 
     function tuneCellSize() {
@@ -608,11 +778,13 @@
     }
 
     function paintCell(cell, pageId, colored) {
-        if (!colored) {
-            cell.style.background = "";
-            cell.style.borderColor = "";
-            cell.style.color = "";
-            cell.style.fontWeight = "";
+        if (!colored || cell.classList.contains("pad")) {
+            if (!colored) {
+                cell.style.background = "";
+                cell.style.borderColor = "";
+                cell.style.color = "";
+                cell.style.fontWeight = "";
+            }
             return;
         }
         const col = colorFor(coreOf(pageId));
@@ -622,7 +794,7 @@
         cell.style.fontWeight = "600";
     }
 
-    function makePageEl(pageId, { colored = false, inCore = false, showTag = true } = {}) {
+    function makePageEl(pageId, { colored = false, inCore = false, showTag = true, alignTone = null } = {}) {
         const pr = Math.floor(pageId / cfg.pagesW);
         const pc = pageId % cfg.pagesW;
         const page = document.createElement("div");
@@ -643,18 +815,53 @@
             for (let dc = 0; dc < cfg.pageW; dc++) {
                 const r = pr * cfg.pageH + dr;
                 const c = pc * cfg.pageW + dc;
+                if (r >= cfg.rows || c >= cfg.cols) continue;
                 const cell = document.createElement("div");
                 cell.className = "cell";
                 cell.dataset.r = String(r);
                 cell.dataset.c = String(c);
                 cell.dataset.page = String(pageId);
                 cell.dataset.core = String(destCore);
-                cell.textContent = `${r},${c}`;
-                paintCell(cell, pageId, colored);
+                const pad = cfg.isPad(r, c);
+                if (pad) {
+                    cell.classList.add("pad");
+                    cell.textContent = "·";
+                    if (alignTone === "blink") cell.classList.add("pad-blink");
+                    else if (alignTone) cell.classList.add("pad-tone");
+                } else {
+                    cell.textContent = `${r},${c}`;
+                    if (alignTone) cell.classList.add("logical-tone");
+                    paintCell(cell, pageId, colored);
+                }
                 page.appendChild(cell);
             }
         }
         return page;
+    }
+
+    // Logical-only grid (no pads) for the input step.
+    function buildLogicalTensor() {
+        tensorStack.innerHTML = "";
+        tensorStack.classList.remove("sliced");
+        tensorStack.style.gridTemplateColumns = "max-content";
+        const page = document.createElement("div");
+        page.className = "page";
+        page.style.padding = "0";
+        page.style.gridTemplateColumns = `repeat(${cfg.logicalCols}, var(--cell-w))`;
+        for (let r = 0; r < cfg.logicalRows; r++) {
+            for (let c = 0; c < cfg.logicalCols; c++) {
+                const pageId = Math.floor(r / cfg.pageH) * cfg.pagesW + Math.floor(c / cfg.pageW);
+                const cell = document.createElement("div");
+                cell.className = "cell";
+                cell.dataset.r = String(r);
+                cell.dataset.c = String(c);
+                cell.dataset.page = String(pageId);
+                cell.dataset.core = String(coreOf(pageId));
+                cell.textContent = `${r},${c}`;
+                page.appendChild(cell);
+            }
+        }
+        tensorStack.appendChild(page);
     }
 
     function buildCoresSkeleton() {
@@ -694,35 +901,62 @@
         }
     }
 
-    function buildTensor({ sliced, colored, ghost }) {
+    function buildTensor({ sliced, colored, ghost, alignTone }) {
         tensorStack.innerHTML = "";
         tensorStack.classList.toggle("sliced", !!sliced);
         tensorStack.style.gridTemplateColumns = `repeat(${cfg.pagesW}, max-content)`;
         for (let p = 0; p < cfg.numPages; p++) {
-            const page = makePageEl(p, { colored: !!colored, showTag: true });
+            const page = makePageEl(p, {
+                colored: !!colored, showTag: true, alignTone: alignTone || null,
+            });
             if (ghost) page.classList.add("ghost");
-            if (!sliced && !colored) page.style.padding = "0";
+            if (!sliced && !colored && !alignTone) page.style.padding = "0";
             tensorStack.appendChild(page);
         }
     }
 
+    function alignLegendHtml() {
+        return (
+            `<div class="swatch-row">` +
+            `<span class="sw"><span class="box logical"></span>logical</span>` +
+            `<span class="sw"><span class="box padded"></span>padding (blinks)</span>` +
+            `</div>`
+        );
+    }
+
     function updateChrome() {
-        const STATES = statesFor();
+        const id = stepId();
+        const st = STATES[state];
         stateNum.textContent = String(state + 1);
-        stateName.textContent = STATES[state].name;
-        captionEl.innerHTML = STATES[state].caption;
-        dots.forEach((d, i) => d.classList.toggle("on", i === state));
+        stateTotal.textContent = String(STATES.length);
+        stateName.textContent = st.name;
+        captionEl.innerHTML = captionFor(id);
+        [...dotsEl.children].forEach((d, i) => d.classList.toggle("on", i === state));
         btnPrev.disabled = state === 0 || playing;
         btnNext.disabled = state === STATES.length - 1 || playing;
 
-        const shape = `shape [${cfg.rows}, ${cfg.cols}]`;
         const lay = cfg.layout === "TILE"
             ? `TILE ${cfg.pageH}×${cfg.pageW}`
             : "ROW_MAJOR";
-        document.getElementById("tensorSub").textContent =
-            state === 1 ? `pages: ${cfg.numPages} × [${cfg.pageH}, ${cfg.pageW}] · ${cfg.layout}`
-            : state === 3 ? `${shape} · colored by core (page i % ${cfg.numCores})`
-            : `${shape} · ${lay}`;
+        const pills =
+            `<span class="shape-pill">logical <em>[${cfg.logicalRows},${cfg.logicalCols}]</em></span>` +
+            `<span class="shape-pill">padded <em>[${cfg.rows},${cfg.cols}]</em></span>` +
+            `<span class="shape-pill">align <em>[${cfg.alignment.join(",")}]</em></span>`;
+        const sub = document.getElementById("tensorSub");
+        if (id === "align") {
+            sub.innerHTML = alignLegendHtml() + pills;
+        } else if (id === "slice") {
+            sub.textContent =
+                `pages: ${cfg.numPages} × [${cfg.pageH}, ${cfg.pageW}] · ${cfg.layout}`;
+        } else if (id === "coremap") {
+            sub.textContent =
+                `shape [${cfg.logicalRows}, ${cfg.logicalCols}] · colored by core (page i % ${cfg.numCores})`;
+        } else if (id === "input") {
+            sub.innerHTML = pills + ` · ${lay}` +
+                (cfg.hasPadding ? "" : ` · <span style="opacity:.8">no pad step</span>`);
+        } else {
+            sub.innerHTML = pills + ` · ${lay}`;
+        }
         document.getElementById("coresSub").textContent =
             `${cfg.numCores} cores · interleaved (page i → core i % ${cfg.numCores})`;
     }
@@ -788,28 +1022,38 @@
     }
 
     async function goTo(next, { animate = true } = {}) {
-        dealToken++;
+        const token = ++dealToken;
         clearHover();
         document.querySelectorAll(".flyer").forEach((f) => f.remove());
 
-        const prev = state;
+        const prevId = stepId();
         state = next;
+        const id = stepId();
         updateChrome();
 
-        if (state === 0) {
-            buildTensor({ sliced: false, colored: false, ghost: false });
+        if (id === "input") {
+            buildLogicalTensor();
             clearCoreSlots();
-        } else if (state === 1) {
+        } else if (id === "align") {
+            if (animate && prevId === "input") {
+                buildLogicalTensor();
+                await sleep(350);
+                if (token !== dealToken) return;
+            }
+            if (token !== dealToken) return;
+            buildTensor({ sliced: false, colored: false, ghost: false, alignTone: "blink" });
+            clearCoreSlots();
+        } else if (id === "slice") {
             buildTensor({ sliced: true, colored: false, ghost: false });
             clearCoreSlots();
-        } else if (state === 2) {
-            if (animate && prev === 1) {
+        } else if (id === "deal") {
+            if (animate && prevId === "slice") {
                 await animateDeal();
             } else {
                 buildTensor({ sliced: false, colored: false, ghost: true });
                 fillCoreSlots();
             }
-        } else if (state === 3) {
+        } else if (id === "coremap") {
             buildTensor({ sliced: false, colored: true, ghost: false });
             fillCoreSlots();
         }
@@ -826,14 +1070,15 @@
         if (playing) { stopPlay(); return; }
         playing = true;
         btnPlay.textContent = "Pause";
-        if (state === 3) await goTo(0, { animate: false });
-        while (playing && state < 3) {
-            updateChrome();
+        if (state === STATES.length - 1) await goTo(0, { animate: false });
+        while (playing && state < STATES.length - 1) {
             await goTo(state + 1, { animate: true });
             if (!playing) break;
-            if (state < 3) {
+            if (state < STATES.length - 1) {
+                const id = stepId();
+                const hold = id === "align" ? 1400 : id === "deal" ? 400 : 900;
                 await new Promise((resolve) => {
-                    playTimer = setTimeout(resolve, state === 2 ? 400 : 900);
+                    playTimer = setTimeout(resolve, hold);
                 });
             }
         }
@@ -849,20 +1094,29 @@
         const err = validate(raw);
         cfgError.textContent = err || "";
         if (err) return;
-        cfg = buildCfg(raw);
+        try {
+            cfg = buildCfg(raw);
+        } catch (e) {
+            cfgError.textContent = e.message || String(e);
+            return;
+        }
         tuneCellSize();
+        rebuildWalkthrough({ keepId: "input" });
+        syncAlignMode();
         buildCoresSkeleton();
-        state = 0;
         goTo(0, { animate: false });
-        // Persist in hash for sharing / refresh
         const q = new URLSearchParams({
-            rows: String(cfg.rows),
-            cols: String(cfg.cols),
+            rows: String(cfg.logicalRows),
+            cols: String(cfg.logicalCols),
             layout: cfg.layout,
-            tileH: String(cfg.layout === "TILE" ? cfg.pageH : Number(inTileH.value)),
-            tileW: String(cfg.layout === "TILE" ? cfg.pageW : Number(inTileW.value)),
+            tileH: String(Number(inTileH.value) || cfg.pageH),
+            tileW: String(Number(inTileW.value) || cfg.pageW),
             cores: String(cfg.numCores),
         });
+        if (cfg.alignMode === "custom") {
+            q.set("alignMode", "custom");
+            if (alignmentEl.value.trim()) q.set("align", alignmentEl.value.trim().replace(/\s+/g, ""));
+        }
         history.replaceState(null, "", `#${q.toString()}`);
     }
 
@@ -876,11 +1130,24 @@
         if (q.has("tileH")) inTileH.value = q.get("tileH");
         if (q.has("tileW")) inTileW.value = q.get("tileW");
         if (q.has("cores")) inCores.value = q.get("cores");
+        if (q.get("alignMode") === "custom" || q.has("align")) {
+            alignModeEl.value = "custom";
+            if (q.has("align")) alignmentEl.value = q.get("align");
+        } else {
+            alignModeEl.value = "default";
+        }
     }
 
     function setPreset(name) {
+        alignModeEl.value = "default";
+        alignmentEl.value = "";
         if (name === "tile") {
             inRows.value = 12; inCols.value = 4;
+            inLayout.value = "TILE";
+            inTileH.value = 4; inTileW.value = 4;
+            inCores.value = 4;
+        } else if (name === "tile-pad") {
+            inRows.value = 10; inCols.value = 5;
             inLayout.value = "TILE";
             inTileH.value = 4; inTileW.value = 4;
             inCores.value = 4;
@@ -891,15 +1158,16 @@
             inCores.value = 4;
         }
         syncLayoutFields();
+        syncAlignMode();
         applyConfig();
     }
 
     inLayout.addEventListener("change", syncLayoutFields);
+    alignModeEl.addEventListener("change", syncAlignMode);
     document.getElementById("btnApply").onclick = () => applyConfig();
     document.querySelectorAll("[data-preset]").forEach((b) => {
         b.onclick = () => setPreset(b.dataset.preset);
     });
-    // Enter in inputs applies
     document.querySelectorAll("#controls input, #controls select").forEach((el) => {
         el.addEventListener("keydown", (e) => {
             if (e.key === "Enter") applyConfig();
@@ -913,6 +1181,7 @@
 
     loadFromHash();
     syncLayoutFields();
+    syncAlignMode();
     applyConfig();
     </script>
 </body>
